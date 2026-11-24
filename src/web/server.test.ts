@@ -1,0 +1,245 @@
+import assert from 'node:assert/strict';
+import type { AddressInfo } from 'node:net';
+import { after, before, describe, it } from 'node:test';
+
+import { createSessionStore } from '../auth/session.js';
+import { issueCiKey, setPassword } from '../auth/store.js';
+import { createGame, createPackageType } from '../catalog/index.js';
+import { ensureSchema, open, type Db } from '../db/index.js';
+import type { RuntimeConfig } from '../shared/config.js';
+import { createApp } from './server.js';
+
+const config: RuntimeConfig = {
+  dataDir: ':memory:',
+  cliHome: ':memory:',
+  port: 0,
+  masterKey: 'test-master-key-0123456789',
+};
+
+let db: Db;
+let base: string;
+let server: ReturnType<typeof createApp>;
+
+before(async () => {
+  db = open({ file: ':memory:' });
+  ensureSchema(db);
+  server = createApp({ config, db, sessions: createSessionStore() });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const addr = server.address() as AddressInfo;
+  base = `http://127.0.0.1:${addr.port}`;
+});
+
+after(async () => {
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  db.close();
+});
+
+describe('公开端点', () => {
+  it('健康检查返回 200', async () => {
+    const res = await fetch(`${base}/healthz`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { status: 'ok' });
+  });
+
+  it('未知路径返回 404', async () => {
+    const res = await fetch(`${base}/nope`);
+    assert.equal(res.status, 404);
+  });
+});
+
+describe('管理 API 鉴权', () => {
+  it('无会话访问管理 API 返回 401', async () => {
+    const res = await fetch(`${base}/api/games`);
+    assert.equal(res.status, 401);
+    assert.deepEqual(await res.json(), { error: 'unauthenticated' });
+  });
+
+  it('CI key 不能当会话用', async () => {
+    const issued = issueCiKey(db, 'for-cross-check');
+    const res = await fetch(`${base}/api/games`, {
+      headers: { authorization: `Bearer ${issued.key}` },
+    });
+    assert.equal(res.status, 401);
+  });
+
+  it('口令登录后可访问管理 API', async () => {
+    setPassword(db, 'admin-password-1');
+
+    const bad = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password: 'wrong-password' }),
+    });
+    assert.equal(bad.status, 401);
+
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password: 'admin-password-1' }),
+    });
+    assert.equal(login.status, 200);
+
+    const cookie = login.headers.get('set-cookie');
+    assert.ok(cookie, '登录应返回会话 Cookie');
+    assert.match(cookie, /HttpOnly/);
+
+    // 已登录后管理 API 不再是 401（端点未实现所以是 404）
+    const res = await fetch(`${base}/api/games`, {
+      headers: { cookie: cookie.split(';')[0]! },
+    });
+    assert.equal(res.status, 404);
+  });
+});
+
+describe('CI 上报：包类型校验', () => {
+  async function report(body: unknown): Promise<Response> {
+    const issued = issueCiKey(db, `k-${Math.random()}`);
+    return fetch(`${base}/api/ci/builds`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${issued.key}`, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  const payload = {
+    game: 'ingest-demo',
+    packageType: 'ingest-wechat',
+    buildId: 'b1',
+    artifactUrl: 'https://example.com/a.zip',
+    sizeBytes: 100,
+    sha256: 'a'.repeat(64),
+  };
+
+  it('未登记的包类型返回 400，且构建表无新增', async () => {
+    createGame(db, { slug: 'ingest-demo', displayName: '示例' });
+    // 包类型故意不登记
+    const before = db.prepare<[], { n: number }>('SELECT COUNT(*) AS n FROM builds').get();
+
+    const res = await report(payload);
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { message: string };
+    assert.match(body.message, /包类型「ingest-wechat」未登记/);
+
+    const after = db.prepare<[], { n: number }>('SELECT COUNT(*) AS n FROM builds').get();
+    assert.equal(after?.n, before?.n, '拒绝时不应写入构建记录');
+  });
+
+  it('未登记的游戏返回 400', async () => {
+    const res = await report({ ...payload, game: 'no-such-game' });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { message: string };
+    assert.match(body.message, /游戏「no-such-game」未登记/);
+  });
+
+  it('载荷缺 sha256 返回 400', async () => {
+    const { sha256, ...incomplete } = payload;
+    const res = await report(incomplete);
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { message: string };
+    assert.match(body.message, /sha256/);
+  });
+
+  it('游戏与包类型都已登记时登记成功，返回 201', async () => {
+    createPackageType(db, { id: 'ingest-wechat', displayName: '微信' });
+    const res = await report(payload);
+    assert.equal(res.status, 201);
+    const body = (await res.json()) as { created: boolean; buildId: string };
+    assert.equal(body.created, true);
+    assert.equal(body.buildId, 'b1');
+  });
+
+  it('重复上报返回 200 且构建数不变', async () => {
+    const before = db.prepare<[], { n: number }>('SELECT COUNT(*) AS n FROM builds').get();
+    const res = await report(payload);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { created: boolean };
+    assert.equal(body.created, false);
+
+    const after = db.prepare<[], { n: number }>('SELECT COUNT(*) AS n FROM builds').get();
+    assert.equal(after?.n, before?.n);
+  });
+});
+
+describe('构建列表接口', () => {
+  async function adminCookie(): Promise<string> {
+    const password = 'builds-list-password';
+    db.prepare('UPDATE settings SET password_hash = NULL WHERE id = 1').run();
+    setPassword(db, password, undefined);
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password }),
+    });
+    return login.headers.get('set-cookie')!.split(';')[0]!;
+  }
+
+  it('无会话时返回 401', async () => {
+    const res = await fetch(`${base}/api/builds`);
+    assert.equal(res.status, 401);
+  });
+
+  it('已登录时返回聚合后的构建组', async () => {
+    const cookie = await adminCookie();
+    const res = await fetch(`${base}/api/builds`, { headers: { cookie } });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { groups: unknown[] };
+    assert.ok(Array.isArray(body.groups));
+  });
+
+  it('limit 非正整数时返回 400', async () => {
+    const cookie = await adminCookie();
+    for (const bad of ['0', '-1', 'abc', '1.5']) {
+      const res = await fetch(`${base}/api/builds?limit=${bad}`, { headers: { cookie } });
+      assert.equal(res.status, 400, `limit=${bad} 应被拒`);
+    }
+  });
+});
+
+describe('CI 上报鉴权', () => {
+  it('无 CI key 上报返回 401', async () => {
+    const res = await fetch(`${base}/api/ci/builds`, { method: 'POST' });
+    assert.equal(res.status, 401);
+    assert.deepEqual(await res.json(), { error: 'invalid_ci_key' });
+  });
+
+  it('错误 CI key 返回 401', async () => {
+    const res = await fetch(`${base}/api/ci/builds`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer mgc_not-a-real-key' },
+    });
+    assert.equal(res.status, 401);
+  });
+
+  it('有效 CI key 通过鉴权（载荷为空所以落在 400 而非 401）', async () => {
+    const issued = issueCiKey(db, 'ci-auth-check');
+    for (const headers of [
+      { authorization: `Bearer ${issued.key}` },
+      { 'x-ci-key': issued.key },
+    ]) {
+      const res = await fetch(`${base}/api/ci/builds`, { method: 'POST', headers });
+      assert.equal(res.status, 400, `headers=${JSON.stringify(headers)}`);
+    }
+  });
+
+  it('会话不能当 CI key 用', async () => {
+    // 不依赖其他测试是否设过口令：直接清掉再设，避免测试间顺序耦合。
+    const password = 'cross-check-password';
+    db.prepare('UPDATE settings SET password_hash = NULL WHERE id = 1').run();
+    setPassword(db, password, undefined);
+
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password }),
+    });
+    assert.equal(login.status, 200);
+    const setCookie = login.headers.get('set-cookie');
+    assert.ok(setCookie, '登录应返回会话 Cookie');
+
+    const res = await fetch(`${base}/api/ci/builds`, {
+      method: 'POST',
+      headers: { cookie: setCookie.split(';')[0]! },
+    });
+    assert.equal(res.status, 401);
+  });
+});

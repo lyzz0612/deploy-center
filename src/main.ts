@@ -1,0 +1,102 @@
+/**
+ * 进程入口：HTTP 服务与任务循环同处一个进程（design.md D1）。
+ */
+import process from 'node:process';
+
+import { createSessionStore } from './auth/session.js';
+import { installCli, seedClis } from './cli/index.js';
+import { databaseFile, ensureSchema, open, type Db } from './db/index.js';
+import { startRunner, type JobHandler, type JobKind } from './jobs/index.js';
+import { registerAllPlugins } from './plugins/index.js';
+import { runSelfCheck } from './registry/index.js';
+import { executeRelease } from './releases/index.js';
+import { loadConfig, type RuntimeConfig } from './shared/config.js';
+import { isEntrypoint } from './shared/entrypoint.js';
+import { startWeb } from './web/server.js';
+
+function listPackageTypeIds(db: Db): string[] {
+  return db
+    .prepare<[], { id: string }>('SELECT id FROM package_types WHERE archived_at IS NULL')
+    .all()
+    .map((r) => r.id);
+}
+
+function buildHandlers(db: Db, config: RuntimeConfig): Partial<Record<JobKind, JobHandler>> {
+  return {
+    publish: (job) =>
+      executeRelease(
+        { db, masterKey: config.masterKey, cliHome: config.cliHome },
+        job,
+      ),
+
+    cli_install: async (job) => {
+      await installCli({
+        cliHome: config.cliHome,
+        cliId: job.job.refId,
+        signal: job.signal,
+        log: (line) => job.log(line),
+      });
+    },
+  };
+}
+
+export function main(): void {
+  const config = loadConfig();
+
+  const db = open({ file: databaseFile(config.dataDir) });
+  const schema = ensureSchema(db);
+  console.log(
+    schema.created
+      ? `database created at schema version ${schema.version}`
+      : `database ready at schema version ${schema.version}`,
+  );
+
+  registerAllPlugins();
+
+  // 注册表问题是配置错误，runSelfCheck 会抛出；存量数据问题只警告。
+  const { warnings } = runSelfCheck(db, { knownPackageTypes: listPackageTypeIds(db) });
+  for (const warning of warnings) {
+    console.warn(`[warn] [${warning.where}] ${warning.message}`);
+  }
+
+  const runner = startRunner({ db, handlers: buildHandlers(db, config) });
+
+  const sessions = createSessionStore();
+  const server = startWeb({ config, db, sessions });
+  console.log('job runner started');
+
+  // 预置安装：CLI 卷为空时投递安装任务。异步进行，不阻塞启动——npm i 是
+  // 分钟级操作，同步装会让健康检查判容器失败然后反复重启。
+  void seedClis(db, config.cliHome)
+    .then((result) => {
+      for (const cliId of result.queued) {
+        console.log(`已投递 ${cliId} 的安装任务`);
+      }
+    })
+    .catch((error: unknown) => {
+      console.warn(
+        `[warn] CLI 预置检查失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+
+  const shutdown = (): void => {
+    runner.stop();
+    server.close(() => {
+      db.close();
+      process.exit(0);
+    });
+  };
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(signal, shutdown);
+  }
+}
+
+if (isEntrypoint(import.meta.url)) {
+  try {
+    main();
+  } catch (error) {
+    // 配置错误要以非零码退出，而不是让一个半死的进程继续服务。
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}

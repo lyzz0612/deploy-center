@@ -1,0 +1,4 @@
+# better-sqlite3 带原生模块：优先用预编译二进制，拉不到时需要允许它跑
+# install 脚本本地编译，否则会静默停在「加载不了 .node」上。
+onlyBuiltDependencies:
+  - better-sqlite3

@@ -1,0 +1,10 @@
+// 测试专用：把测试文件一起编译到 dist-test，避免测试代码进生产镜像。
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "dist-test",
+    "declaration": false
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": []
+}

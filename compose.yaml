@@ -1,0 +1,40 @@
+# 发布中控台的部署定义：单个服务 + 两个持久卷（design.md D1）。
+#
+# 没有独立的 db 服务：SQLite 是进程内嵌库，没有服务端进程，它以数据卷的
+# 形式存在。也没有独立的 migrate 服务：系统没有存量数据，启动时建表即可
+# （design.md D7b）。
+
+name: minigames-console
+
+services:
+  app:
+    build:
+      context: .
+    image: minigames-console:local
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATA_DIR: /data
+      CLI_HOME: /opt/cli
+      PORT: "3000"
+      # 凭据加密主密钥。必须由部署方提供，缺失时进程拒绝启动而不是
+      # 退化成明文存储（design.md D5）。
+      MASTER_KEY: ${MASTER_KEY:?MASTER_KEY is required}
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    volumes:
+      - console-data:/data
+      - console-cli:/opt/cli
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  # SQLite 数据库文件
+  console-data:
+  # 平台 CLI 安装目录。装在卷里而不是容器层，否则 --force-recreate
+  # 之后 CLI 会无声消失（design.md D6）。
+  console-cli:
