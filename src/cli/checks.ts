@@ -101,6 +101,14 @@ export async function checkTarget(deps: CheckTargetDeps, targetId: string): Prom
   const ctx: PublishContext = {
     artifactDir: '',
     workdir: '',
+    // 检查阶段不针对某次构建，给一个明确的占位而不是假数据
+    build: {
+      buildId: '',
+      commitSha: null,
+      packageTypeId: '',
+      sha256: '',
+      sizeBytes: 0,
+    },
     target: target.location,
     params: {},
     cliHome: deps.cliHome,

@@ -77,6 +77,13 @@ export async function executeRelease(deps: ExecuteDeps, job: JobContext): Promis
     managed = await createContext({
       artifactDir: prepared.artifactDir,
       workdir: prepared.workdir,
+      build: {
+        buildId: build.buildId,
+        commitSha: build.commitSha,
+        packageTypeId: build.packageTypeId,
+        sha256: build.sha256,
+        sizeBytes: build.sizeBytes,
+      },
       target: target.location,
       params: release.params,
       cliHome,

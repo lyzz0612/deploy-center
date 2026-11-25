@@ -183,6 +183,13 @@ describe('密钥物化与清理', () => {
     const managed = await createContext({
       artifactDir: scratch,
       workdir: scratch,
+      build: {
+        buildId: 'test-build',
+        commitSha: null,
+        packageTypeId: 'echo-pkg',
+        sha256: 'a'.repeat(64),
+        sizeBytes: 1,
+      },
       target: {},
       params: {},
       cliHome: '/opt/cli',
@@ -205,6 +212,13 @@ describe('密钥物化与清理', () => {
     const managed = await createContext({
       artifactDir: dir,
       workdir: dir,
+      build: {
+        buildId: 'test-build',
+        commitSha: null,
+        packageTypeId: 'echo-pkg',
+        sha256: 'a'.repeat(64),
+        sizeBytes: 1,
+      },
       target: {},
       params: {},
       cliHome: '/opt/cli',

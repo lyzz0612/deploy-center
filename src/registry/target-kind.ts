@@ -92,9 +92,22 @@ export interface GlobalCheckContext {
  * 这六类东西就是「扩展成本低」的全部原因：插件作者只需要关心
  * 「拿到一个已就绪的目录，调一个命令，解析一个结果」。
  */
+/** 本次发布对应的构建事实。插件按需使用，不必自己去查库。 */
+export interface BuildInfo {
+  /** CI 上报的构建标识。H5 用它当版本目录名，平台型插件用它做日志关联。 */
+  readonly buildId: string;
+  /** 源码 commit，没有时为 null。 */
+  readonly commitSha: string | null;
+  readonly packageTypeId: string;
+  readonly sha256: string;
+  readonly sizeBytes: number;
+}
+
 export interface PublishContext {
   /** 已下载、已校验 sha256、已解压的产物目录。 */
   readonly artifactDir: string;
+  /** 本次发布的构建信息。 */
+  readonly build: BuildInfo;
   /** 本次任务的工作目录。核心创建，任务结束后删除。 */
   readonly workdir: string;
   /** 目标实例的位置字段（明文配置，不含密钥）。 */
@@ -181,4 +194,12 @@ export interface TargetKind {
 
   execute(stageId: string, ctx: PublishContext): Promise<StageResult>;
   verify?(ctx: PublishContext): Promise<VerifyResult>;
+
+  /**
+   * 原地回滚。只在 `capabilities.rollback === 'pointer'` 时需要实现。
+   *
+   * `republish` 不走这里——那是「以旧版本构建发起一次新发布」，由核心
+   * 建一条新的发布记录完成，插件什么都不用知道。
+   */
+  rollback?(ctx: PublishContext): Promise<StageResult>;
 }

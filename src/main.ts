@@ -4,6 +4,7 @@
 import process from 'node:process';
 
 import { createSessionStore } from './auth/session.js';
+import { seedPackageTypes } from './catalog/index.js';
 import { installCli, seedClis } from './cli/index.js';
 import { databaseFile, ensureSchema, open, type Db } from './db/index.js';
 import { startRunner, type JobHandler, type JobKind } from './jobs/index.js';
@@ -52,6 +53,13 @@ export function main(): void {
   );
 
   registerAllPlugins();
+
+  // 补齐插件声明的包类型。必须在自检之前：自检会校验 accepts 指向的包类型
+  // 存在，而一个全新部署的库里什么都没有。
+  const seeded = seedPackageTypes(db);
+  if (seeded.created.length > 0) {
+    console.log(`已登记包类型：${seeded.created.join(', ')}`);
+  }
 
   // 注册表问题是配置错误，runSelfCheck 会抛出；存量数据问题只警告。
   const { warnings } = runSelfCheck(db, { knownPackageTypes: listPackageTypeIds(db) });

@@ -21,7 +21,7 @@ const baseManifest: TargetKindManifest = {
   targetFields: [{ key: 'bucket', label: 'Bucket', type: 'string', required: true, identity: true }],
   publishFields: [],
   stages: [{ id: 'upload', name: '上传', timeoutMs: 60_000 }],
-  capabilities: { rollback: 'pointer', verify: false, activateLatencySeconds: 1 },
+  capabilities: { rollback: 'none', verify: false, activateLatencySeconds: 1 },
 };
 
 function kindWith(overrides: Partial<TargetKindManifest>, extra: Partial<TargetKind> = {}): TargetKind {
@@ -127,6 +127,23 @@ describe('注册表自检：阶段与能力', () => {
       kindWith({ capabilities: { rollback: 'none', verify: true, activateLatencySeconds: 0 } }),
     );
     assert.match(checkRegistries()[0]!.message, /没有实现 verify/);
+  });
+
+  it('声明指针回退但没实现 rollback 被报出', () => {
+    registerTargetKind(
+      kindWith({ capabilities: { rollback: 'pointer', verify: false, activateLatencySeconds: 0 } }),
+    );
+    assert.match(checkRegistries()[0]!.message, /pointer 但没有实现 rollback/);
+  });
+
+  it('实现了 rollback 但声明不是 pointer 也被报出', () => {
+    registerTargetKind(
+      kindWith(
+        { capabilities: { rollback: 'republish', verify: false, activateLatencySeconds: 0 } },
+        { rollback: async () => ({}) },
+      ),
+    );
+    assert.match(checkRegistries()[0]!.message, /永远不会被调用/);
   });
 
   it('实现了 verify 但没声明也被报出（它永远不会被调用）', () => {

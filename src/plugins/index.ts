@@ -12,9 +12,11 @@
  * 这五步之外还要动核心，就说明抽象错了（design.md D4）。
  */
 import { registerTargetKind, type TargetKind } from '../registry/index.js';
+import { h5DirPlugin } from './h5-dir/index.js';
+import { wechatPlugin } from './wechat/index.js';
 
-/** 已实现的目标类型。微信在 9.1、H5 在 10.1 加入。 */
-const PLUGINS: readonly TargetKind[] = [];
+/** 已实现的目标类型。 */
+const PLUGINS: readonly TargetKind[] = [wechatPlugin, h5DirPlugin];
 
 /** 把全部插件注册进注册表。进程启动时调用一次。 */
 export function registerAllPlugins(): void {

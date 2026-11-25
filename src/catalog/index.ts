@@ -15,6 +15,8 @@ export {
   type ListGamesOptions,
 } from './games.js';
 
+export { seedPackageTypes, type SeedPackageTypesResult } from './seed.js';
+
 export {
   archivePackageType,
   createPackageType,

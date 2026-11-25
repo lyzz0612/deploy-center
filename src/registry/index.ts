@@ -15,6 +15,7 @@ export type { CliInstallKind, CliSpec } from './cli-spec.js';
 export { findCliSpec, getCliSpec, listCliSpecs } from './cli-spec.js';
 
 export type {
+  BuildInfo,
   Capabilities,
   Check,
   CheckLevel,

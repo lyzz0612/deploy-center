@@ -93,6 +93,20 @@ export function checkRegistries(options: SelfCheckOptions = {}): SelfCheckProble
       });
     }
 
+    // 声明「指针回退」却没实现 rollback()，用户点回滚时会撞上 undefined
+    if (m.capabilities.rollback === 'pointer' && kind.rollback === undefined) {
+      problems.push({
+        where,
+        message: 'capabilities.rollback 为 pointer 但没有实现 rollback()',
+      });
+    }
+    if (m.capabilities.rollback !== 'pointer' && kind.rollback !== undefined) {
+      problems.push({
+        where,
+        message: `实现了 rollback() 但 capabilities.rollback 是 ${m.capabilities.rollback}，它永远不会被调用`,
+      });
+    }
+
     // 目标实例的表单里不允许出现密钥字段——那些在凭据里（design.md D5）。
     for (const field of m.targetFields) {
       if (/secret|password|privatekey|token|accesskey/i.test(field.key)) {

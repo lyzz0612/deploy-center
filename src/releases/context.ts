@@ -10,10 +10,11 @@
 import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import type { PublishContext } from '../registry/index.js';
+import type { BuildInfo, PublishContext } from '../registry/index.js';
 
 export interface ContextDeps {
   readonly artifactDir: string;
+  readonly build: BuildInfo;
   readonly workdir: string;
   readonly target: Record<string, unknown>;
   readonly params: Record<string, unknown>;
@@ -46,6 +47,7 @@ export async function createContext(deps: ContextDeps): Promise<ManagedContext> 
 
   const ctx: PublishContext = {
     artifactDir: deps.artifactDir,
+    build: deps.build,
     workdir: deps.workdir,
     target: deps.target,
     params: deps.params,
