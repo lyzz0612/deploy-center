@@ -4,6 +4,7 @@
 import { randomUUID } from 'node:crypto';
 
 import type { Db } from '../db/index.js';
+import { decryptCiKeyValue, encryptCiKeyValue } from '../shared/crypto.js';
 import { generateCiKey, hashPassword, hashToken, tokenMatches, verifyPassword } from '../shared/hash.js';
 
 function now(): string {
@@ -70,56 +71,158 @@ export interface CiKeySummary {
   readonly id: string;
   readonly name: string;
   readonly prefix: string;
+  /**
+   * 明文。设置页要随时复制，所以这里返回解密后的值。
+   * 老记录（v3 之前签发）或主密钥变更导致解不开时为 null。
+   */
+  readonly value: string | null;
   readonly createdAt: string;
   readonly lastUsedAt: string | null;
   readonly revokedAt: string | null;
 }
 
-export interface IssuedCiKey {
+interface CiKeyRow {
   readonly id: string;
   readonly name: string;
   readonly prefix: string;
-  /** 明文 key，只在签发这一刻返回，之后无法再取回。 */
-  readonly key: string;
+  readonly token_hash: string;
+  readonly token_encrypted: Buffer | null;
+  readonly created_at: string;
+  readonly last_used_at: string | null;
+  readonly revoked_at: string | null;
 }
 
-/** 签发一个 CI key。明文只返回一次，库里只留哈希。 */
-export function issueCiKey(db: Db, name: string): IssuedCiKey {
-  if (name.trim().length === 0) {
+/** 自定义 key 的下限。低于这个长度连「自用」都谈不上。 */
+const MIN_KEY_LENGTH = 8;
+
+function normalizeKeyValue(value: string): string {
+  const trimmed = value.trim();
+  if (/\s/.test(trimmed)) {
+    throw new Error('CI key 不能包含空白字符');
+  }
+  if (trimmed.length < MIN_KEY_LENGTH) {
+    throw new Error(`CI key 至少 ${MIN_KEY_LENGTH} 个字符`);
+  }
+  return trimmed;
+}
+
+function toCiKeySummary(row: CiKeyRow, masterKey: string): CiKeySummary {
+  let value: string | null = null;
+  if (row.token_encrypted !== null) {
+    try {
+      value = decryptCiKeyValue(row.token_encrypted, masterKey);
+    } catch {
+      // 主密钥换过时老密文解不开。让列表照常打开，界面提示重新设置，
+      // 而不是整个设置页报错。
+      value = null;
+    }
+  }
+
+  return {
+    id: row.id,
+    name: row.name,
+    prefix: row.prefix,
+    value,
+    createdAt: row.created_at,
+    lastUsedAt: row.last_used_at,
+    revokedAt: row.revoked_at,
+  };
+}
+
+function readCiKeyRow(db: Db, id: string): CiKeyRow {
+  const row = db.prepare<[string], CiKeyRow>('SELECT * FROM ci_keys WHERE id = ?').get(id);
+  if (row === undefined) {
+    throw new Error(`CI key ${id} 不存在`);
+  }
+  return row;
+}
+
+function getCiKey(db: Db, id: string, masterKey: string): CiKeySummary {
+  return toCiKeySummary(readCiKeyRow(db, id), masterKey);
+}
+
+/**
+ * 新建一个 CI key。
+ *
+ * `value` 留空时生成 256 位随机值；也可以直接指定——自用后台没必要强制
+ * 「只显示一次」，值随时可在设置页查看和替换。
+ */
+export function issueCiKey(
+  db: Db,
+  name: string,
+  masterKey: string,
+  value?: string,
+): CiKeySummary {
+  const trimmedName = name.trim();
+  if (trimmedName.length === 0) {
     throw new Error('CI key 名称不能为空');
   }
-  const { key, prefix } = generateCiKey();
+
+  const generated = value === undefined || value.trim() === '' ? generateCiKey() : null;
+  const key = generated === null ? normalizeKeyValue(value ?? '') : generated.key;
+  const prefix = generated === null ? key.slice(0, 8) : generated.prefix;
+
   const id = randomUUID();
   db.prepare(
-    `INSERT INTO ci_keys (id, name, prefix, token_hash, created_at)
-     VALUES (?, ?, ?, ?, ?)`,
-  ).run(id, name, prefix, hashToken(key), now());
-  return { id, name, prefix, key };
+    `INSERT INTO ci_keys (id, name, prefix, token_hash, token_encrypted, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(id, trimmedName, prefix, hashToken(key), encryptCiKeyValue(key, masterKey), now());
+  return getCiKey(db, id, masterKey);
 }
 
-export function listCiKeys(db: Db): CiKeySummary[] {
-  interface Row {
-    readonly id: string;
-    readonly name: string;
-    readonly prefix: string;
-    readonly created_at: string;
-    readonly last_used_at: string | null;
-    readonly revoked_at: string | null;
+export interface UpdateCiKeyInput {
+  readonly name?: string;
+  /** 新的 key 原文。给出时旧值立即失效。 */
+  readonly value?: string;
+}
+
+/** 改名或更换值。更换值后旧值立即失效（哈希与密文一起换）。 */
+export function updateCiKey(
+  db: Db,
+  id: string,
+  changes: UpdateCiKeyInput,
+  masterKey: string,
+): CiKeySummary {
+  const current = readCiKeyRow(db, id);
+  if (current.revoked_at !== null) {
+    throw new Error('CI key 已吊销，不能修改；请新建一条');
   }
+
+  const name = changes.name === undefined ? current.name : changes.name.trim();
+  if (name.length === 0) {
+    throw new Error('CI key 名称不能为空');
+  }
+
+  let tokenHash = current.token_hash;
+  let prefix = current.prefix;
+  let encrypted = current.token_encrypted;
+
+  if (changes.value !== undefined) {
+    const value = normalizeKeyValue(changes.value);
+    tokenHash = hashToken(value);
+    prefix = value.slice(0, 8);
+    encrypted = encryptCiKeyValue(value, masterKey);
+  }
+
+  try {
+    db.prepare(
+      'UPDATE ci_keys SET name = ?, prefix = ?, token_hash = ?, token_encrypted = ? WHERE id = ?',
+    ).run(name, prefix, tokenHash, encrypted, id);
+  } catch (error) {
+    if (error instanceof Error && /UNIQUE/.test(error.message)) {
+      throw new Error('这个 CI key 值已被另一条记录使用，请换一个');
+    }
+    throw error;
+  }
+
+  return getCiKey(db, id, masterKey);
+}
+
+export function listCiKeys(db: Db, masterKey: string): CiKeySummary[] {
   const rows = db
-    .prepare<[], Row>(
-      `SELECT id, name, prefix, created_at, last_used_at, revoked_at
-       FROM ci_keys ORDER BY created_at DESC`,
-    )
+    .prepare<[], CiKeyRow>('SELECT * FROM ci_keys ORDER BY created_at DESC')
     .all();
-  return rows.map((r) => ({
-    id: r.id,
-    name: r.name,
-    prefix: r.prefix,
-    createdAt: r.created_at,
-    lastUsedAt: r.last_used_at,
-    revokedAt: r.revoked_at,
-  }));
+  return rows.map((row) => toCiKeySummary(row, masterKey));
 }
 
 export function revokeCiKey(db: Db, id: string): void {

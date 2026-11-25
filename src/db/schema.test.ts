@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 
 import { ensureSchema, open, type Db } from './connection.js';
 import { locationKey } from './location-key.js';
-import { EXPECTED_INDEXES, EXPECTED_TABLES } from './schema.js';
+import { EXPECTED_INDEXES, EXPECTED_TABLES, SCHEMA_VERSION } from './schema.js';
 
 function freshDb(): Db {
   const db = open({ file: ':memory:' });
@@ -113,6 +113,60 @@ describe('结构完整性', () => {
       for (const index of EXPECTED_INDEXES) {
         assert.ok(names.has(index), `缺少索引 ${index}`);
       }
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe('结构升级', () => {
+  it('v3 的库缺少 token_encrypted 时补齐该列，且保留已有数据', () => {
+    const db = open({ file: ':memory:' });
+    try {
+      // 造一个 v3 的 ci_keys：没有 token_encrypted 列
+      db.exec(
+        `CREATE TABLE ci_keys (
+           id           TEXT PRIMARY KEY,
+           name         TEXT NOT NULL,
+           prefix       TEXT NOT NULL,
+           token_hash   TEXT NOT NULL UNIQUE,
+           created_at   TEXT NOT NULL,
+           last_used_at TEXT,
+           revoked_at   TEXT
+         )`,
+      );
+      db.prepare(
+        `INSERT INTO ci_keys (id, name, prefix, token_hash, created_at)
+         VALUES ('legacy', '旧 key', 'mgc_lega', ?, ?)`,
+      ).run('a'.repeat(64), now());
+      db.pragma('user_version = 3');
+
+      const result = ensureSchema(db);
+      assert.equal(result.previousVersion, 3);
+      assert.equal(result.version, SCHEMA_VERSION);
+
+      const columns = db.pragma('table_info(ci_keys)') as Array<{ name: string }>;
+      assert.ok(
+        columns.some((column) => column.name === 'token_encrypted'),
+        '升级后应补上 token_encrypted 列',
+      );
+      const row = db
+        .prepare<[string], { name: string; token_encrypted: Buffer | null }>(
+          'SELECT name, token_encrypted FROM ci_keys WHERE id = ?',
+        )
+        .get('legacy');
+      assert.equal(row?.name, '旧 key');
+      assert.equal(row?.token_encrypted, null, '老记录没有原文，应为 NULL 而不是假数据');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('版本高于本程序时拒绝打开', () => {
+    const db = open({ file: ':memory:' });
+    try {
+      db.pragma(`user_version = ${SCHEMA_VERSION + 1}`);
+      assert.throws(() => ensureSchema(db), /高于本程序支持/);
     } finally {
       db.close();
     }

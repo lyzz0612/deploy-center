@@ -90,9 +90,9 @@ describe('管理 API 鉴权', () => {
   });
 
   it('CI key 不能当会话用', async () => {
-    const issued = issueCiKey(db, 'for-cross-check');
+    const issued = issueCiKey(db, 'for-cross-check', config.masterKey);
     const res = await fetch(`${base}/api/games`, {
-      headers: { authorization: `Bearer ${issued.key}` },
+      headers: { authorization: `Bearer ${issued.value!}` },
     });
     assert.equal(res.status, 401);
   });
@@ -126,12 +126,84 @@ describe('管理 API 鉴权', () => {
   });
 });
 
+describe('设置页：CI key', () => {
+  async function adminCookie(): Promise<string> {
+    const password = 'ci-key-page-password';
+    resetPassword(password);
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password }),
+    });
+    return login.headers.get('set-cookie')!.split(';')[0]!;
+  }
+
+  it('/settings 跳到 CI key 分区', async () => {
+    const cookie = await adminCookie();
+    const res = await fetch(`${base}/settings`, { headers: { cookie }, redirect: 'manual' });
+    assert.equal(res.status, 303);
+    assert.equal(res.headers.get('location'), '/settings/ci-keys');
+  });
+
+  it('保存自定义值后，页面上能直接看到完整 key', async () => {
+    const cookie = await adminCookie();
+    const value = 'self-use-key-20261125';
+    const created = await fetch(`${base}/settings/ci-keys`, {
+      method: 'POST',
+      headers: { cookie },
+      body: new URLSearchParams({ name: '页面可见性测试', value }).toString(),
+      redirect: 'manual',
+    });
+    assert.equal(created.status, 303);
+
+    const res = await fetch(`${base}/settings/ci-keys`, { headers: { cookie } });
+    const body = await res.text();
+    assert.match(body, /self-use-key-20261125/);
+    assert.match(body, /页面可见性测试/);
+    assert.doesNotMatch(body, /只显示这一次/);
+  });
+
+  it('可以随时换值，旧值立即失效', async () => {
+    const cookie = await adminCookie();
+    const oldValue = 'replace-me-key-0001';
+    await fetch(`${base}/settings/ci-keys`, {
+      method: 'POST',
+      headers: { cookie },
+      body: new URLSearchParams({ name: '可替换值测试', value: oldValue }).toString(),
+      redirect: 'manual',
+    });
+
+    const row = db
+      .prepare<[string], { id: string }>('SELECT id FROM ci_keys WHERE name = ?')
+      .get('可替换值测试');
+    assert.ok(row);
+
+    const updated = await fetch(`${base}/settings/ci-keys/${row.id}`, {
+      method: 'POST',
+      headers: { cookie },
+      body: new URLSearchParams({ name: '可替换值测试', value: 'replacement-key-0002' }).toString(),
+      redirect: 'manual',
+    });
+    assert.equal(updated.status, 303);
+
+    const page = await fetch(`${base}/settings/ci-keys`, { headers: { cookie } });
+    const body = await page.text();
+    assert.match(body, /replacement-key-0002/);
+
+    const rejected = await fetch(`${base}/api/ci/builds`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${oldValue}` },
+    });
+    assert.equal(rejected.status, 401, '换值后旧 key 必须立即失效');
+  });
+});
+
 describe('CI 上报：包类型校验', () => {
   async function report(body: unknown): Promise<Response> {
-    const issued = issueCiKey(db, `k-${Math.random()}`);
+    const issued = issueCiKey(db, `k-${Math.random()}`, config.masterKey);
     return fetch(`${base}/api/ci/builds`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${issued.key}`, 'content-type': 'application/json' },
+      headers: { authorization: `Bearer ${issued.value!}`, 'content-type': 'application/json' },
       body: JSON.stringify(body),
     });
   }
@@ -245,10 +317,10 @@ describe('CI 上报鉴权', () => {
   });
 
   it('有效 CI key 通过鉴权（载荷为空所以落在 400 而非 401）', async () => {
-    const issued = issueCiKey(db, 'ci-auth-check');
+    const issued = issueCiKey(db, 'ci-auth-check', config.masterKey);
     for (const headers of [
-      { authorization: `Bearer ${issued.key}` },
-      { 'x-ci-key': issued.key },
+      { authorization: `Bearer ${issued.value!}` },
+      { 'x-ci-key': issued.value! },
     ]) {
       const res = await fetch(`${base}/api/ci/builds`, { method: 'POST', headers });
       assert.equal(res.status, 400, `headers=${JSON.stringify(headers)}`);

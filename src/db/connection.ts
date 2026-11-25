@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 
 import Database from 'better-sqlite3';
 
-import { DDL, EXPECTED_INDEXES, EXPECTED_TABLES, SCHEMA_VERSION } from './schema.js';
+import { DDL, EXPECTED_INDEXES, EXPECTED_TABLES, MIGRATIONS, SCHEMA_VERSION } from './schema.js';
 
 export type Db = Database.Database;
 
@@ -69,6 +69,21 @@ export interface EnsureSchemaResult {
 }
 
 /**
+ * 按版本顺序执行升级语句。
+ *
+ * 只跑 fromVersion 之后、当前版本之前的步骤；每一步都是可叠加的 DDL，
+ * 重复执行不至于毁数据（ALTER 加列在正常路径下只会跑一次）。
+ */
+function applyMigrations(db: Db, fromVersion: number): void {
+  for (const migration of MIGRATIONS) {
+    if (migration.version <= fromVersion || migration.version > SCHEMA_VERSION) continue;
+    for (const statement of migration.statements) {
+      db.exec(statement);
+    }
+  }
+}
+
+/**
  * 建表并核对结构。可重复调用，第二次为无变更。
  *
  * 为什么建完还要核对：`CREATE TABLE IF NOT EXISTS` 只保证「表存在就不动」，
@@ -88,14 +103,9 @@ export function ensureSchema(db: Db): EnsureSchemaResult {
   const tablesBefore = listObjects(db, 'table');
   const created = previousVersion === 0 && !EXPECTED_TABLES.some((t) => tablesBefore.has(t));
 
-  if (previousVersion !== 0 && previousVersion < SCHEMA_VERSION) {
-    throw new Error(
-      `数据库结构版本为 ${previousVersion}，本程序需要 ${SCHEMA_VERSION}。` +
-        '已有数据的库需要迁移，而本版本尚未实现迁移机制（design.md D7b）。',
-    );
-  }
-
   db.transaction(() => {
+    // 老库先补列/补表，再跑一遍统一 DDL（新库直接走后者）。
+    if (previousVersion !== 0) applyMigrations(db, previousVersion);
     for (const statement of DDL) {
       db.exec(statement);
     }

@@ -1,9 +1,9 @@
 /**
  * 单向哈希与定时安全比较。
  *
- * 这里处理的是**只需验证、不需取回原文**的东西（管理员口令、CI key），
- * 与凭据（Credential）不同：凭据要交给平台 CLI 使用，必须可逆解密。
- * 两者不共用一套机制，也不共用 MASTER_KEY。
+ * 这里处理的是**校验路径**：管理员口令只存哈希；CI key 的校验也走哈希
+ * （另外在 crypto.ts 里存一份可逆密文供设置页展示）。凭据则必须可逆解密，
+ * 交给平台 CLI 使用。
  */
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 

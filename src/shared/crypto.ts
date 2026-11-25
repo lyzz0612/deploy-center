@@ -1,8 +1,10 @@
 /**
- * 凭据的对称加密（design.md D5）。
+ * 可逆加密（design.md D5）。
  *
- * 与 hash.ts 的分工：那边处理「只需验证、不需取回」的东西（口令、CI key），
- * 用单向哈希；这边处理必须交给平台 CLI 使用的凭据，所以必须可逆。
+ * 与 hash.ts 的分工：那边处理「只需验证、不需取回」的东西（管理员口令），
+ * 用单向哈希；这边处理必须取回原文的数据：交给平台 CLI 的凭据，以及
+ * 设置页要随时展示的 CI key 原文。两者用不同的 HKDF info 派生密钥，
+ * 密文互不相通。
  *
  * 三个选择的理由：
  *
@@ -25,20 +27,66 @@ const TAG_BYTES = 16;
 const FORMAT_VERSION = 1;
 
 /**
- * HKDF 的 info 参数，把派生密钥绑定到「凭据加密」这个用途上。
- * 同一个主密钥将来若用于别处，两边派生出的密钥互不相同。
+ * HKDF 的 info 参数，把派生密钥绑定到具体用途上。
+ * 同一个主密钥给不同用途派生出互不相同的密钥——即使一处泄漏，
+ * 也解不开另一类密文。
  */
-const HKDF_INFO = 'minigames-console/credential/v1';
+const CREDENTIAL_HKDF_INFO = 'minigames-console/credential/v1';
+const CI_KEY_HKDF_INFO = 'minigames-console/ci-key/v1';
 
 /**
  * 从主密钥派生加密密钥。
  *
- * salt 用固定值而非随机：凭据的 salt 得跟密文一起存，而我们已经为每条
+ * salt 用固定值而非随机：密文的 salt 得跟数据一起存，而我们已经为每条
  * 记录用了独立 nonce，随机 salt 不再提供额外保护，只会让每次解密都要
  * 多读一段。这里的作用是域分隔，固定值足够。
  */
-function deriveKey(masterKey: string): Buffer {
-  return Buffer.from(hkdfSync('sha256', masterKey, 'minigames-console', HKDF_INFO, KEY_BYTES));
+function deriveKey(masterKey: string, info: string): Buffer {
+  return Buffer.from(hkdfSync('sha256', masterKey, 'minigames-console', info, KEY_BYTES));
+}
+
+/**
+ * 加密一段文本。密文布局：`[1 字节版本][12 字节 nonce][密文][16 字节标签]`
+ */
+function seal(plaintext: string, masterKey: string, info: string): Buffer {
+  const key = deriveKey(masterKey, info);
+  const nonce = randomBytes(NONCE_BYTES);
+  const cipher = createCipheriv(ALGORITHM, key, nonce);
+
+  const ciphertext = Buffer.concat([
+    cipher.update(Buffer.from(plaintext, 'utf8')),
+    cipher.final(),
+  ]);
+  const tag = cipher.getAuthTag();
+
+  return Buffer.concat([Buffer.from([FORMAT_VERSION]), nonce, ciphertext, tag]);
+}
+
+/** 解密一段文本。任何异常都直接抛，不返回空值。 */
+function unseal(payload: Buffer, masterKey: string, info: string, label: string): string {
+  if (payload.length < 1 + NONCE_BYTES + TAG_BYTES) {
+    throw new Error(`${label}密文长度不足，数据已损坏`);
+  }
+
+  const version = payload[0];
+  if (version !== FORMAT_VERSION) {
+    throw new Error(`不支持的${label}密文版本 ${version}，本程序只认识 ${FORMAT_VERSION}`);
+  }
+
+  const nonce = payload.subarray(1, 1 + NONCE_BYTES);
+  const tag = payload.subarray(payload.length - TAG_BYTES);
+  const ciphertext = payload.subarray(1 + NONCE_BYTES, payload.length - TAG_BYTES);
+
+  const decipher = createDecipheriv(ALGORITHM, deriveKey(masterKey, info), nonce);
+  decipher.setAuthTag(tag);
+
+  try {
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+  } catch {
+    // GCM 的认证失败在这里统一变成一句人话。原始错误是
+    // 「Unsupported state or unable to authenticate data」，看不出所以然。
+    throw new Error(`${label}解密失败：主密钥不正确，或密文已被篡改`);
+  }
 }
 
 /**
@@ -46,22 +94,12 @@ function deriveKey(masterKey: string): Buffer {
  *
  * 整组一起加密而不是逐字段：字段名本身（`accessKeyId` 还是 `privateKey`）
  * 也是信息，整体加密顺带把它藏起来，而且省掉逐字段的 nonce 管理。
- *
- * 密文布局：`[1 字节版本][12 字节 nonce][密文][16 字节认证标签]`
  */
 export function encryptSecrets(
   secrets: Record<string, string>,
   masterKey: string,
 ): Buffer {
-  const key = deriveKey(masterKey);
-  const nonce = randomBytes(NONCE_BYTES);
-  const cipher = createCipheriv(ALGORITHM, key, nonce);
-
-  const plaintext = Buffer.from(JSON.stringify(secrets), 'utf8');
-  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  const tag = cipher.getAuthTag();
-
-  return Buffer.concat([Buffer.from([FORMAT_VERSION]), nonce, ciphertext, tag]);
+  return seal(JSON.stringify(secrets), masterKey, CREDENTIAL_HKDF_INFO);
 }
 
 /**
@@ -71,32 +109,9 @@ export function encryptSecrets(
  * 悄悄返回空值会让一次发布拿着空密钥打到平台上去，错误跑到远处才出现。
  */
 export function decryptSecrets(payload: Buffer, masterKey: string): Record<string, string> {
-  if (payload.length < 1 + NONCE_BYTES + TAG_BYTES) {
-    throw new Error('凭据密文长度不足，数据已损坏');
-  }
+  const plaintext = unseal(payload, masterKey, CREDENTIAL_HKDF_INFO, '凭据');
 
-  const version = payload[0];
-  if (version !== FORMAT_VERSION) {
-    throw new Error(`不支持的凭据密文版本 ${version}，本程序只认识 ${FORMAT_VERSION}`);
-  }
-
-  const nonce = payload.subarray(1, 1 + NONCE_BYTES);
-  const tag = payload.subarray(payload.length - TAG_BYTES);
-  const ciphertext = payload.subarray(1 + NONCE_BYTES, payload.length - TAG_BYTES);
-
-  const decipher = createDecipheriv(ALGORITHM, deriveKey(masterKey), nonce);
-  decipher.setAuthTag(tag);
-
-  let plaintext: Buffer;
-  try {
-    plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-  } catch {
-    // GCM 的认证失败在这里统一变成一句人话。原始错误是
-    // 「Unsupported state or unable to authenticate data」，看不出所以然。
-    throw new Error('凭据解密失败：主密钥不正确，或密文已被篡改');
-  }
-
-  const parsed: unknown = JSON.parse(plaintext.toString('utf8'));
+  const parsed: unknown = JSON.parse(plaintext);
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error('凭据明文不是对象，数据已损坏');
   }
@@ -109,4 +124,19 @@ export function decryptSecrets(payload: Buffer, masterKey: string): Record<strin
     result[field] = value;
   }
   return result;
+}
+
+/**
+ * 加密 CI key 原文。
+ *
+ * CI key 本来只需哈希校验，但自用后台要求「随时能看到、随时能改」，
+ * 于是额外存一份可逆密文供设置页读取。校验仍然走哈希，不依赖解密。
+ */
+export function encryptCiKeyValue(value: string, masterKey: string): Buffer {
+  return seal(value, masterKey, CI_KEY_HKDF_INFO);
+}
+
+/** 解密 CI key 原文。 */
+export function decryptCiKeyValue(payload: Buffer, masterKey: string): string {
+  return unseal(payload, masterKey, CI_KEY_HKDF_INFO, 'CI key ');
 }

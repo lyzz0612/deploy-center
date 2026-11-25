@@ -1,12 +1,21 @@
 /**
- * 发布记录列表与详情（11.4）。
+ * 发布记录列表与详情。
  */
 import { getBuild } from '../../builds/index.js';
 import type { Db } from '../../db/index.js';
 import { findTargetKind } from '../../registry/index.js';
 import { getRelease, listReleases, listStageAttempts, type Release } from '../../releases/index.js';
 import { getTarget } from '../../targets/index.js';
-import { html, join, shortTime, statusBadge, type Html } from '../html.js';
+import {
+  emptyPanel,
+  html,
+  join,
+  pageHeader,
+  shortTime,
+  statusBadge,
+  sectionTitle,
+  type Html,
+} from '../html.js';
 
 function targetName(db: Db, targetId: string): string {
   try {
@@ -33,36 +42,74 @@ export function releasesPage(db: Db): Html {
         <td>${statusBadge(release.status)}</td>
         <td><code>${buildLabel(db, release.buildId)}</code></td>
         <td>${targetName(db, release.targetId)}</td>
-        <td class="small">
-          ${join(
-            release.stages.map(
-              (stage) => html`<span>${stage.stageId} ${statusBadge(stage.status)}</span>`,
-            ),
-            ' ',
-          )}
+        <td>
+          <div class="target-badges">
+            ${join(
+              release.stages.map(
+                (stage) => html`
+                  <span class="badge ${stageClass(stage.status)}">
+                    ${stage.stageId} · ${stageStatusLabel(stage.status)}
+                  </span>
+                `,
+              ),
+            )}
+          </div>
         </td>
-        <td class="muted small">${shortTime(release.createdAt)}</td>
-        <td><a href="/releases/${release.id}">详情</a></td>
+        <td class="subtle">${shortTime(release.createdAt)}</td>
+        <td>
+          <div class="row-actions">
+            <a class="btn secondary small" href="/releases/${release.id}">详情</a>
+          </div>
+        </td>
       </tr>
     `,
   );
 
   return html`
-    <h1>发布记录</h1>
-    <p class="lead">每次发布一条，维度是「构建 × 目标」。</p>
-    <div class="card">
-      ${releases.length === 0
-        ? html`<p class="empty">还没有发布记录。</p>`
-        : html`
-            <table>
-              <thead>
-                <tr><th>状态</th><th>构建</th><th>目标</th><th>阶段</th><th>发起时间</th><th></th></tr>
-              </thead>
-              <tbody>${join(rows)}</tbody>
-            </table>
-          `}
-    </div>
+    ${pageHeader({
+      title: '发布记录',
+      lead: html`每次发布一条，维度是「构建 × 目标」。重试会保留历史阶段，不覆盖旧记录。`,
+    })}
+    ${releases.length === 0
+      ? emptyPanel(
+          html`<strong>还没有发布记录</strong>到构建列表里挑一个包发布。`,
+          html`<a class="btn" href="/builds">前往构建列表</a>`,
+        )
+      : html`
+          <div class="panel">
+            <div class="table-wrap">
+              <table class="table">
+                <thead>
+                  <tr><th>状态</th><th>构建</th><th>目标</th><th>阶段</th><th>发起</th><th></th></tr>
+                </thead>
+                <tbody>${join(rows)}</tbody>
+              </table>
+            </div>
+          </div>
+        `}
   `;
+}
+
+function stageClass(status: string): string {
+  if (status === 'success') return 'ok';
+  if (status === 'failed' || status === 'timeout') return 'err';
+  if (status === 'running') return 'run';
+  if (status === 'queued') return 'warn';
+  return '';
+}
+
+function stageStatusLabel(status: string): string {
+  return (
+    {
+      queued: '排队中',
+      running: '执行中',
+      success: '成功',
+      failed: '失败',
+      timeout: '超时',
+      cancelled: '已取消',
+      skipped: '已跳过',
+    }[status] ?? status
+  );
 }
 
 export function releaseDetailPage(db: Db, release: Release): Html {
@@ -86,38 +133,40 @@ export function releaseDetailPage(db: Db, release: Release): Html {
       const attempts = listStageAttempts(db, release.id, stage.stageId);
       const declaredName =
         kind?.manifest.stages.find((s) => s.id === stage.stageId)?.name ?? stage.stageId;
+      const previous = attempts.filter((a) => a.attempt !== stage.attempt);
 
       return html`
-        <div class="card">
-          <strong>${declaredName}</strong>
-          ${statusBadge(stage.status)}
-          <span class="muted small">
-            第 ${stage.attempt} 次尝试 ·
-            ${shortTime(stage.startedAt)} → ${shortTime(stage.finishedAt)}
-          </span>
-          ${stage.log === ''
-            ? html`<p class="muted small">没有日志输出。</p>`
-            : html`<pre>${stage.log}</pre>`}
-          ${attempts.length > 1
-            ? html`
-                <details>
-                  <summary class="small">之前的 ${attempts.length - 1} 次尝试</summary>
-                  ${join(
-                    attempts
-                      .filter((a) => a.attempt !== stage.attempt)
-                      .map(
-                        (a) => html`
-                          <p class="small">
-                            第 ${a.attempt} 次 ${statusBadge(a.status)}
-                            <span class="muted">${shortTime(a.finishedAt)}</span>
+        <div class="stage ${stageClass(stage.status)}">
+          <div class="stage-head">
+            <strong>${declaredName}</strong>
+            ${statusBadge(stage.status)}
+            <span class="subtle">
+              第 ${stage.attempt} 次尝试 · ${shortTime(stage.startedAt)} → ${shortTime(stage.finishedAt)}
+            </span>
+          </div>
+          <div class="stage-body">
+            ${stage.log === ''
+              ? html`<p class="subtle" style="margin:0">没有日志输出。</p>`
+              : html`<pre>${stage.log}</pre>`}
+            ${previous.length === 0
+              ? html``
+              : html`
+                  <details style="margin-top:14px">
+                    <summary class="subtle">之前的 ${previous.length} 次尝试</summary>
+                    ${join(
+                      previous.map(
+                        (attempt) => html`
+                          <p class="small" style="margin-top:12px">
+                            第 ${attempt.attempt} 次 ${statusBadge(attempt.status)}
+                            <span class="subtle">${shortTime(attempt.finishedAt)}</span>
                           </p>
-                          ${a.log === '' ? html`` : html`<pre>${a.log}</pre>`}
+                          ${attempt.log === '' ? html`` : html`<pre>${attempt.log}</pre>`}
                         `,
                       ),
-                  )}
-                </details>
-              `
-            : html``}
+                    )}
+                  </details>
+                `}
+          </div>
         </div>
       `;
     }),
@@ -126,60 +175,75 @@ export function releaseDetailPage(db: Db, release: Release): Html {
   // 回滚入口按目标类型声明的能力显示，不是所有目标都有
   const rollbackSection =
     rollbackMode === 'none'
-      ? html`<p class="small muted">该目标类型不支持回滚。</p>`
+      ? html`<p class="subtle" style="margin:0">该目标类型不支持回滚。</p>`
       : rollbackMode === 'pointer'
         ? html`
-            <p class="small">
+            <p class="subtle">
               该目标支持指针回退：只改生效指针，不重新写入产物。
               ${kind === undefined
-                ? html``
-                : html`<span class="muted">
-                    预计 ${kind.manifest.capabilities.activateLatencySeconds} 秒生效。
-                  </span>`}
+                ? ''
+                : `预计 ${kind.manifest.capabilities.activateLatencySeconds} 秒生效。`}
             </p>
             <form method="post" action="/releases/${release.id}/rollback">
-              <button class="secondary" type="submit">切回上一版本</button>
+              <button class="btn secondary" type="submit">切回上一版本</button>
             </form>
           `
         : html`
-            <p class="small">
+            <p class="subtle" style="margin:0">
               该平台没有回滚动作，只能把旧版本重新发一次。到
               <a href="/builds">构建列表</a> 选择旧版本发布。
             </p>
           `;
 
   return html`
-    <h1>发布详情</h1>
-    <p class="lead">
-      ${statusBadge(release.status)}
-      <code>${buildLabel(db, release.buildId)}</code> →
-      ${target === null ? release.targetId : target.name}
-      · 发起于 ${shortTime(release.createdAt)}
-      · 操作者 ${release.createdBy}
-    </p>
+    ${pageHeader({
+      title: `发布 ${buildLabel(db, release.buildId)}`,
+      lead: html`${statusBadge(release.status)}
+        → ${target === null ? release.targetId : target.name} ·
+        发起于 ${shortTime(release.createdAt)} · 操作者 ${release.createdBy}`,
+      actions: html`<a class="btn secondary" href="/releases">返回发布记录</a>`,
+    })}
 
-    <div class="card">
-      <h3>发布参数</h3>
-      <pre>${JSON.stringify(release.params, null, 2)}</pre>
+    ${sectionTitle('概要')}
+    <div class="panel">
+      <div class="panel-body">
+        <dl class="meta">
+          <dt>构建</dt>
+          <dd><code>${buildLabel(db, release.buildId)}</code></dd>
+          <dt>目标</dt>
+          <dd>
+            ${target === null
+              ? release.targetId
+              : html`<a href="/targets/${target.id}">${target.name}</a>
+                  <span class="subtle">（${target.kindDisplayName}）</span>`}
+          </dd>
+          <dt>发布参数</dt>
+          <dd><pre class="light">${JSON.stringify(release.params, null, 2)}</pre></dd>
+          <dt>完成时间</dt>
+          <dd>${shortTime(release.finishedAt)}</dd>
+        </dl>
+      </div>
     </div>
 
-    <h2>阶段</h2>
+    ${sectionTitle('阶段')}
     ${stageCards}
 
-    <h2>操作</h2>
-    <div class="card">
-      ${retriable
-        ? html`
-            <p class="small">
-              重试会从第一个未成功的阶段继续，已成功的阶段不会重新执行。
-            </p>
-            <form method="post" action="/releases/${release.id}/retry">
-              <button type="submit">重试失败阶段</button>
-            </form>
-            <hr style="border:none;border-top:1px solid var(--line);margin:16px 0">
-          `
-        : html``}
-      ${rollbackSection}
+    ${sectionTitle('操作')}
+    <div class="panel">
+      <div class="panel-body">
+        ${retriable
+          ? html`
+              <p class="subtle" style="margin-bottom:12px">
+                重试会从第一个未成功的阶段继续，已成功的阶段不会重新执行。
+              </p>
+              <form method="post" action="/releases/${release.id}/retry">
+                <button class="btn" type="submit">重试失败阶段</button>
+              </form>
+              <hr>
+            `
+          : html``}
+        ${rollbackSection}
+      </div>
     </div>
   `;
 }

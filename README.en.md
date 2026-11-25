@@ -45,7 +45,7 @@ This repo is a self-hosted publish console for that problem: **CI only builds an
 
 ## Status
 
-The core path works and is verified against real HTTP: 429 tests pass, H5 publish and rollback were checked through an actual external URL, and both platform CLIs install successfully.
+The core path works and is verified against real HTTP: 433 tests pass, H5 publish and rollback were checked through an actual external URL, and both platform CLIs install successfully.
 
 **Not yet verified**: deployment on a real Docker host, a real WeChat upload (that needs a mini-game account and a code upload key), and the image workflow itself — it is configured (tags `v*` or manual dispatch → smoke test → GHCR) but has not run yet. See [README.md](README.md) for details.
 

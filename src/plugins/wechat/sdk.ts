@@ -57,7 +57,7 @@ export async function loadMiniProgramCi(cliHome: string): Promise<MiniProgramCi>
   const current = await currentPrefix(cliHome, 'miniprogram-ci');
   if (current === undefined) {
     throw new CliNotInstalledError(
-      'miniprogram-ci 尚未安装。到「全局设置 → CLI 管理」安装它后再发布',
+      'miniprogram-ci 尚未安装。到「设置 → 平台 CLI」安装它后再发布',
     );
   }
 

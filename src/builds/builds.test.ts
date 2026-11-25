@@ -9,6 +9,8 @@ import { parseBuildReport, resolveReport } from './ingest.js';
 import { getBuild, upsertBuild } from './store.js';
 import { listBuilds } from './views.js';
 
+const MASTER_KEY = 'test-master-key-0123456789';
+
 function freshDb(): Db {
   const db = open({ file: ':memory:' });
   ensureSchema(db);
@@ -142,7 +144,7 @@ describe('上报 upsert', () => {
   it('记录上报用的 CI key，便于追溯来源', () => {
     const { db } = setup();
     try {
-      const issued = issueCiKey(db, 'github-actions');
+      const issued = issueCiKey(db, 'github-actions', MASTER_KEY);
       const result = ingest(db, {}, issued.id);
       const row = db
         .prepare<[string], { ci_key_id: string | null }>('SELECT ci_key_id FROM builds WHERE id = ?')

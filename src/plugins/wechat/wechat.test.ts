@@ -179,7 +179,7 @@ describe('项目根目录探测', () => {
         (error: unknown) => {
           assert.ok(error instanceof CliNotInstalledError);
           assert.match(error.message, /尚未安装/);
-          assert.match(error.message, /CLI 管理/, '应指出去哪里安装');
+          assert.match(error.message, /平台 CLI/, '应指出去哪里安装');
           return true;
         },
       );

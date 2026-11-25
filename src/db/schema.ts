@@ -1,11 +1,12 @@
 /**
- * 数据库结构定义（design.md D7b：建表，不是迁移框架）。
+ * 数据库结构定义（design.md D7b：建表 + 可叠加的升级步骤）。
  *
- * 系统没有存量数据，所以这里只有 `CREATE TABLE IF NOT EXISTS`。
- * 第一次需要改动已上线的表结构时，再引入真正的迁移机制。
+ * 主路径仍是 `CREATE TABLE IF NOT EXISTS`；已经部署过的库靠 MIGRATIONS
+ * 里按版本号排列的语句补齐新列。只接受加列/加表这类不丢数据的改动。
  *
  * SCHEMA_VERSION 写进 `PRAGMA user_version`，只用于「知道当前在哪一版」。
- * 改动下面任何一条 DDL 时必须同时 +1，否则已有库会与代码悄悄不一致。
+ * 改动下面任何一条 DDL 时必须同时 +1，并在 MIGRATIONS 里补一步，否则
+ * 已有库会与代码悄悄不一致。
  *
  * 两条贯穿全表的约定：
  *
@@ -16,8 +17,8 @@
  *   可直接比较，比存 epoch 数字更省心。
  */
 
-/** 当前结构版本。改 DDL 必须同时递增。 */
-export const SCHEMA_VERSION = 3;
+/** 当前结构版本。改 DDL 必须同时递增，并在 MIGRATIONS 里补一步。 */
+export const SCHEMA_VERSION = 4;
 
 /**
  * 建表语句。顺序即依赖顺序（被引用的表在前）。
@@ -33,16 +34,21 @@ export const DDL: readonly string[] = [
      updated_at      TEXT NOT NULL
    )`,
 
-  // CI key。只存哈希，永不存原文：CI key 只需验证，不需取回
-  // （与 Credential 不同，后者要交给平台 CLI 使用，必须可逆）。
+  // CI key。token_hash 只用于恒定时间校验；token_encrypted 是可逆加密的
+  // 原文，供设置页随时复制与替换——自用后台不需要「只显示一次」的仪式。
+  // 两列并存不是冗余：校验走哈希，展示走密文，各取所长。
+  //
+  // token_encrypted 允许为空：v3 之前签发的老记录没有原文，界面会提示
+  // 重新设置一个新值，而不是假装它还能取回。
   `CREATE TABLE IF NOT EXISTS ci_keys (
-     id           TEXT PRIMARY KEY,
-     name         TEXT NOT NULL,
-     prefix       TEXT NOT NULL,
-     token_hash   TEXT NOT NULL UNIQUE,
-     created_at   TEXT NOT NULL,
-     last_used_at TEXT,
-     revoked_at   TEXT
+     id              TEXT PRIMARY KEY,
+     name            TEXT NOT NULL,
+     prefix          TEXT NOT NULL,
+     token_hash      TEXT NOT NULL UNIQUE,
+     token_encrypted BLOB,
+     created_at      TEXT NOT NULL,
+     last_used_at    TEXT,
+     revoked_at      TEXT
    )`,
 
   /* -------------------------------- 全局数据 -------------------------------- */
@@ -210,6 +216,27 @@ export const DDL: readonly string[] = [
   // 取下一个待执行任务时按状态 + seq 扫，给它一个索引。
   `CREATE INDEX IF NOT EXISTS idx_jobs_pending
      ON jobs (status, seq)`,
+];
+
+/**
+ * 结构升级步骤。只在「库里已有数据、版本落后」时按序执行。
+ *
+ * 这里刻意只收**可叠加的改动**（加列、加表、加索引）：单人自用系统没有
+ * 回滚通道，破坏性迁移一旦写错就没有退路。改列语义或删列应另开一次
+ * 完整的设计与备份流程，而不是塞进这张表。
+ */
+export interface Migration {
+  /** 升级到哪一版。 */
+  readonly version: number;
+  readonly statements: readonly string[];
+}
+
+export const MIGRATIONS: readonly Migration[] = [
+  {
+    // v3 → v4：CI key 增加可逆密文列，用于在设置页随时查看与替换。
+    version: 4,
+    statements: ['ALTER TABLE ci_keys ADD COLUMN token_encrypted BLOB'],
+  },
 ];
 
 /**

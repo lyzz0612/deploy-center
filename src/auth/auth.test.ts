@@ -4,7 +4,18 @@ import { describe, it } from 'node:test';
 import { ensureSchema, open, type Db } from '../db/index.js';
 import { hashPassword, verifyPassword } from '../shared/hash.js';
 import { createSessionStore } from './session.js';
-import { checkPassword, isPasswordSet, issueCiKey, listCiKeys, revokeCiKey, setPassword, verifyCiKey } from './store.js';
+import {
+  checkPassword,
+  isPasswordSet,
+  issueCiKey,
+  listCiKeys,
+  revokeCiKey,
+  setPassword,
+  updateCiKey,
+  verifyCiKey,
+} from './store.js';
+
+const MASTER_KEY = 'test-master-key-0123456789';
 
 function freshDb(): Db {
   const db = open({ file: ':memory:' });
@@ -83,33 +94,72 @@ describe('管理员口令', () => {
 });
 
 describe('CI key', () => {
-  it('签发后可校验，明文只在签发时返回', () => {
+  it('签发后可校验，且列表里能取回明文', () => {
     const db = freshDb();
     try {
-      const issued = issueCiKey(db, 'github-actions');
-      assert.match(issued.key, /^mgc_/);
-      assert.equal(verifyCiKey(db, issued.key), issued.id);
+      const issued = issueCiKey(db, 'github-actions', MASTER_KEY);
+      assert.match(issued.value ?? '', /^mgc_/);
+      assert.equal(verifyCiKey(db, issued.value!), issued.id);
 
-      // 列表里只有前缀，没有明文
-      const list = listCiKeys(db);
+      const list = listCiKeys(db, MASTER_KEY);
       assert.equal(list.length, 1);
       assert.equal(list[0]!.prefix, issued.prefix);
-      assert.equal(JSON.stringify(list).includes(issued.key), false);
+      assert.equal(list[0]!.value, issued.value);
     } finally {
       db.close();
     }
   });
 
-  it('库里只存哈希，不存明文', () => {
+  it('可以指定 key 值，也可以随时换成另一个值', () => {
     const db = freshDb();
     try {
-      const issued = issueCiKey(db, 'k');
+      const issued = issueCiKey(db, 'self-use', MASTER_KEY, 'my-own-ci-key-0001');
+      assert.equal(issued.value, 'my-own-ci-key-0001');
+      assert.equal(verifyCiKey(db, 'my-own-ci-key-0001'), issued.id);
+
+      updateCiKey(db, issued.id, { value: 'my-own-ci-key-0002' }, MASTER_KEY);
+      assert.equal(verifyCiKey(db, 'my-own-ci-key-0001'), null, '旧值应立即失效');
+      assert.equal(verifyCiKey(db, 'my-own-ci-key-0002'), issued.id);
+      assert.equal(listCiKeys(db, MASTER_KEY)[0]!.value, 'my-own-ci-key-0002');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('过短的自定义 key 被拒', () => {
+    const db = freshDb();
+    try {
+      assert.throws(() => issueCiKey(db, 'k', MASTER_KEY, 'short'), /至少 8 个字符/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('库里存的是哈希与密文，不出现明文', () => {
+    const db = freshDb();
+    try {
+      const issued = issueCiKey(db, 'k', MASTER_KEY);
       const row = db
-        .prepare<[], { token_hash: string }>('SELECT token_hash FROM ci_keys')
+        .prepare<[], { token_hash: string; token_encrypted: Buffer }>(
+          'SELECT token_hash, token_encrypted FROM ci_keys',
+        )
         .get();
       assert.ok(row);
-      assert.equal(row.token_hash.includes(issued.key), false);
+      assert.equal(row.token_hash.includes(issued.value!), false);
       assert.match(row.token_hash, /^[0-9a-f]{64}$/);
+      assert.equal(row.token_encrypted.toString('utf8').includes(issued.value!), false);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('主密钥不对时列表仍能打开，只是取不回明文', () => {
+    const db = freshDb();
+    try {
+      issueCiKey(db, 'k', MASTER_KEY);
+      const list = listCiKeys(db, 'another-master-key-9876543210');
+      assert.equal(list.length, 1);
+      assert.equal(list[0]!.value, null);
     } finally {
       db.close();
     }
@@ -118,20 +168,24 @@ describe('CI key', () => {
   it('错误 key 不通过', () => {
     const db = freshDb();
     try {
-      issueCiKey(db, 'k');
+      issueCiKey(db, 'k', MASTER_KEY);
       assert.equal(verifyCiKey(db, 'mgc_wrong-key-value'), null);
     } finally {
       db.close();
     }
   });
 
-  it('吊销后不再通过', () => {
+  it('吊销后不再通过，也不能再改值', () => {
     const db = freshDb();
     try {
-      const issued = issueCiKey(db, 'k');
+      const issued = issueCiKey(db, 'k', MASTER_KEY);
       revokeCiKey(db, issued.id);
-      assert.equal(verifyCiKey(db, issued.key), null);
+      assert.equal(verifyCiKey(db, issued.value!), null);
       assert.throws(() => revokeCiKey(db, issued.id), /已吊销/);
+      assert.throws(
+        () => updateCiKey(db, issued.id, { value: 'another-key-0001' }, MASTER_KEY),
+        /已吊销/,
+      );
     } finally {
       db.close();
     }
@@ -140,10 +194,10 @@ describe('CI key', () => {
   it('校验成功会记录使用时间', () => {
     const db = freshDb();
     try {
-      const issued = issueCiKey(db, 'k');
-      assert.equal(listCiKeys(db)[0]!.lastUsedAt, null);
-      verifyCiKey(db, issued.key);
-      assert.notEqual(listCiKeys(db)[0]!.lastUsedAt, null);
+      const issued = issueCiKey(db, 'k', MASTER_KEY);
+      assert.equal(listCiKeys(db, MASTER_KEY)[0]!.lastUsedAt, null);
+      verifyCiKey(db, issued.value!);
+      assert.notEqual(listCiKeys(db, MASTER_KEY)[0]!.lastUsedAt, null);
     } finally {
       db.close();
     }
