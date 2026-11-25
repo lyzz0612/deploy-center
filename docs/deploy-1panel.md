@@ -35,22 +35,27 @@ services:
     # 只绑回环：公网只经 1Panel 的 OpenResty 进来，3000 不对公网开
     ports:
       - "127.0.0.1:${WEB_PORT:-3000}:3000"
+    # 不用 Docker 卷：数据落在编排目录下的 data/ 与 cli/，看得见、好备份
     volumes:
-      - console-data:/data
-      - console-cli:/opt/cli
+      - ./data:/data
+      - ./cli:/opt/cli
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
-
-volumes:
-  console-data:
-  console-cli:
 ```
 
-先别启动。
+先别启动。**先建数据目录并给权限**——容器以 uid 1000（`node`）运行，目录若是 Docker 以 root 自动创建的，SQLite 会因无写权限直接启动失败：
+
+```bash
+cd /opt/1panel/docker/compose/minigames-console
+mkdir -p data cli
+chown -R 1000:1000 data cli
+```
+
+`./data`、`./cli` 相对的是**编排文件所在目录**（1Panel 里就是 `/opt/1panel/docker/compose/minigames-console/`），不是当前终端目录。想放别处就写绝对路径，例如 `/srv/minigames/data:/data`。
 
 ## 3. 写 .env
 
@@ -120,14 +125,14 @@ curl -s https://api.ipify.org; echo
 
 ## 8. 升级
 
-改 `.env` 里的 `IMAGE_TAG` → 编排页「拉取镜像」→「重启」，或者终端：
+改镜像 tag（写死在 YAML 里就改 YAML；用 `.env` 就改 `IMAGE_TAG`）→ 编排页「拉取镜像」→「重启」，或者终端：
 
 ```bash
 cd /opt/1panel/docker/compose/minigames-console
 docker compose pull && docker compose up -d
 ```
 
-数据卷与 CLI 卷不动。CLI 装在卷里就是为了这个——装进容器层的话，换镜像后会无声消失。
+`data/` 与 `cli/` 不动。CLI 装在目录里就是为了这个——装进容器层的话，换镜像后会无声消失。
 
 ## 9. 备份
 
@@ -152,7 +157,7 @@ find "$DIR" -name 'console-*.db' -mtime +14 -delete
 - [ ] `curl -fsS http://127.0.0.1:3000/healthz` 返回 `{"status":"ok"}`
 - [ ] 域名 HTTPS 打开中控台，能设置/输入口令并登录
 - [ ] 设置页能签发 CI key，构建列表能打开
-- [ ] 建一条游戏或包类型，重启容器后还在（数据卷生效）
+- [ ] 建一条游戏或包类型，重启容器后还在（`data/` 目录生效）
 - [ ] 需要平台 CLI 时能装上，装完探测通过
 
 部署总览与故障演练见 [deploy.md](deploy.md)，镜像规则见其中「镜像从哪来（CI）」，CI 上报接口见 [ci-report.md](ci-report.md)。
