@@ -100,7 +100,13 @@ docker compose exec app node -e "fetch('https://api.ipify.org').then(r=>r.text()
 
 **流程**：先构建到 runner 本地 → 真起容器查 `/healthz` 与首次设置页 → 通过了才登录 GHCR 推送。坏镜像不会进仓库。
 
-**手动触发的前提**：GitHub 只在默认分支上列出 `workflow_dispatch` 工作流。本仓库默认分支目前是 `framework`，所以要先让这份工作流进入默认分支（合并分支或切换默认分支），Actions 页面才会出现 Run workflow 按钮；**推 `v*` 标签不受影响**，只要打标签的那个提交里带着这个工作流。
+**手动触发的前提**：GitHub 只在默认分支上列出 `workflow_dispatch` 工作流。本仓库默认分支目前是 `framework`，所以 Actions 页面要等这份工作流进入默认分支（合并分支或切换默认分支）后才会出现 Run workflow 按钮；**推 `v*` 标签不受影响**——按 GitHub 文档，`push`（含 tag）会执行被推提交里的工作流，"This includes workflows that are not merged into the default branch"。
+
+另外，工作流只要跑过一次，就可以用 CLI 对任意分支手动触发（UI 按钮仍要求默认分支有该文件）：
+
+```bash
+gh workflow run docker-publish.yml --ref deploy-center -f push_image=false
+```
 
 镜像位于 `ghcr.io/lyzz0612/minigames`。**GHCR 的包默认是私有的**，部署机首次拉取要登录（token 带 `read:packages` 即可）；想匿名拉取就到包的设置里把可见性改成 public。
 
