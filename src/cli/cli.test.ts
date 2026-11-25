@@ -316,6 +316,34 @@ describe('首启预置', () => {
       db.close();
     }
   });
+
+  it('失败过的也不再自动重投（否则重启几次就堆几条）', async () => {
+    const db = freshDb();
+    try {
+      const home = freshHome();
+      await seedClis(db, home);
+
+      // 把全部安装任务标为失败，模拟「网络不通装不上」
+      const jobs = listJobs(db, { kind: 'cli_install' });
+      for (const job of jobs) {
+        db.prepare("UPDATE jobs SET status = 'failed', error = '网络不通' WHERE id = ?").run(job.id);
+      }
+
+      const result = await seedClis(db, home);
+      assert.deepEqual(result.queued, [], '失败过的不该自动重投');
+      assert.equal(
+        listJobs(db, { kind: 'cli_install' }).length,
+        jobs.length,
+        '任务数不该增长——失败原因通常不会因为重启而改变',
+      );
+      assert.ok(
+        result.skipped.some((s) => /最近一次 failed/.test(s.reason)),
+        '跳过原因要说清是因为已经试过了',
+      );
+    } finally {
+      db.close();
+    }
+  });
 });
 
 describe('npm 调用方式（跨平台）', () => {

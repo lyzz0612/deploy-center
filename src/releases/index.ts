@@ -1,5 +1,6 @@
 export { createContext, type ContextDeps, type ManagedContext } from './context.js';
 export { executeRelease, type ExecuteDeps } from './execute.js';
+export { recoverRelease, type RecoveredRelease } from './recover.js';
 export {
   appendStageLog,
   createRelease,
@@ -8,6 +9,7 @@ export {
   listReleases,
   listStageAttempts,
   prepareRetry,
+  ROLLBACK_STAGE_ID,
   setReleaseStatus,
   startStage,
   type CreateReleaseInput,

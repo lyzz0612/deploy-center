@@ -199,13 +199,14 @@ describe('中断恢复', () => {
       const job = claimNext(db)!;
       assert.equal(job.status, 'running');
 
-      const count = recoverInterrupted(db);
-      assert.equal(count, 1);
+      const interrupted = recoverInterrupted(db);
+      assert.equal(interrupted.length, 1);
+      assert.equal(interrupted[0]!.refId, 'r1', '应返回被中断的任务，供调用方收拾关联记录');
 
-      const recovered = getJob(db, job.id);
-      assert.equal(recovered.status, 'failed');
-      assert.match(recovered.error ?? '', /进程中断/);
-      assert.match(recovered.log, /\[恢复\]/);
+      const stored = getJob(db, job.id);
+      assert.equal(stored.status, 'failed');
+      assert.match(stored.error ?? '', /进程中断/);
+      assert.match(stored.log, /\[恢复\]/);
     } finally {
       db.close();
     }
@@ -233,7 +234,7 @@ describe('中断恢复', () => {
       const done = claimNext(db)!;
       finish(db, done.id, 'success');
 
-      assert.equal(recoverInterrupted(db), 0);
+      assert.deepEqual(recoverInterrupted(db), []);
       assert.equal(listJobs(db, { status: 'queued' }).length, 1);
       assert.equal(listJobs(db, { status: 'success' }).length, 1);
     } finally {

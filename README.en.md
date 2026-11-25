@@ -39,29 +39,29 @@ This repo is a self-hosted publish console for that problem: **CI only builds an
 - Credentials are typed, encrypted and only referenced by publish targets, so rotation touches one place.
 - A release is a multi-stage job: immutable record, retry only the failed stage, rollback decided by declared capability.
 
-**Stack**: Node.js 22 + TypeScript, SQLite (WAL), React + Vite, Docker Compose (one service, two volumes).
+**Stack**: Node.js 22 + TypeScript, SQLite (WAL), server-rendered HTML, Docker Compose (one service, two volumes).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 ## Status
 
-Planning stage. The architecture, domain model and plugin contract are settled; there is no runnable code yet. See [README.md](README.md) for the full picture and [openspec/changes/add-publish-console](openspec/changes/add-publish-console) for the artifacts.
+The core path works and is verified against real HTTP: 429 tests pass, H5 publish and rollback were checked through an actual external URL, and both platform CLIs install successfully.`n`n**Not yet verified**: deployment on a real Docker host, and a real WeChat upload (that needs a mini-game account and a code upload key). See [README.md](README.md) for details.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 ## Roadmap
 
 - [x] Architecture, domain model and plugin contract
-- [ ] Service skeleton: compose, migrations, auth
-- [ ] Data layer, registries and startup self-check
-- [ ] Credential management
-- [ ] Game and package-type management
-- [ ] CI ingestion API and build views
-- [ ] Job runner (stages, retry, timeout, crash recovery)
-- [ ] CLI installation and three-layer probing
-- [ ] WeChat plugin, then an H5 target plugin
-- [ ] Console UI
-- [ ] End-to-end deployment verification
+- [x] Service skeleton: compose, schema creation, auth
+- [x] Data layer, registries and startup self-check
+- [x] Credential management
+- [x] Game and package-type management
+- [x] CI ingestion API and build views
+- [x] Job runner (stages, retry, timeout, crash recovery)
+- [x] CLI installation and three-layer probing
+- [x] WeChat plugin (real upload pending) and an H5 target plugin
+- [x] Console UI
+- [ ] End-to-end deployment on a Docker host
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -80,7 +80,7 @@ Planning stage. The architecture, domain model and plugin contract are settled; 
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
-[status-shield]: https://img.shields.io/badge/status-planning-yellow
+[status-shield]: https://img.shields.io/badge/status-alpha-blue
 [status-url]: openspec/changes/add-publish-console/proposal.md
 [node-shield]: https://img.shields.io/badge/node-%3E%3D22-339933?logo=nodedotjs&logoColor=white
 [node-url]: https://nodejs.org/

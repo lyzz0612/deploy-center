@@ -28,7 +28,9 @@ export function isTerminal(status: JobStatus): boolean {
 
 /** 允许的状态转移。键是当前状态，值是可以转到的状态。 */
 const TRANSITIONS: Readonly<Record<JobStatus, readonly JobStatus[]>> = {
-  queued: ['running', 'cancelled'],
+  // queued → failed 是中断恢复用的：进程在任务排队期间被杀，重启后发现
+  // 它既没开始也不该自动开始（中断点未知），只能标为失败让人决定。
+  queued: ['running', 'cancelled', 'failed'],
   running: ['success', 'failed', 'timeout', 'cancelled'],
   success: [],
   failed: [],

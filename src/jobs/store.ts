@@ -159,7 +159,7 @@ export function cancel(db: Db, id: string): Job {
  * 刻意**不自动重跑**：中断点未知，重跑可能产生重复的平台上传。要不要重试
  * 由人决定（release-execution spec：重试只重试失败阶段）。
  */
-export function recoverInterrupted(db: Db): number {
+export function recoverInterrupted(db: Db): Job[] {
   const stale = db.prepare<[], JobRow>("SELECT * FROM jobs WHERE status = 'running'").all();
   const stamp = now();
   for (const row of stale) {
@@ -175,5 +175,8 @@ export function recoverInterrupted(db: Db): number {
       row.id,
     );
   }
-  return stale.length;
+  // 返回被恢复的任务而不只是个数：任务之外的记录（发布记录与它的阶段）
+  // 也停在 running，调用方要据此一并收拾，否则界面上那条发布会永远
+  // 显示「执行中」，连重试入口都不出现。
+  return stale.map(toJob);
 }

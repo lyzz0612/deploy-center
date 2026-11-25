@@ -14,6 +14,7 @@ import {
   finishStage,
   getRelease,
   setReleaseStatus,
+  ROLLBACK_STAGE_ID,
   startStage,
   type Release,
   type StageStatus,
@@ -99,8 +100,9 @@ export async function executeRelease(deps: ExecuteDeps, job: JobContext): Promis
     let failed = false;
 
     for (const stage of todo) {
+      const isRollback = stage.stageId === ROLLBACK_STAGE_ID;
       const declared = kind.manifest.stages.find((s) => s.id === stage.stageId);
-      const stageName = declared?.name ?? stage.stageId;
+      const stageName = isRollback ? '回滚' : (declared?.name ?? stage.stageId);
 
       if (failed) {
         // 前序阶段失败时后续阶段不执行（release-execution spec）
@@ -121,12 +123,17 @@ export async function executeRelease(deps: ExecuteDeps, job: JobContext): Promis
       const stageCtx = { ...managed.ctx, log: stageLog };
 
       try {
-        const timeoutMs = declared?.timeoutMs;
-        const result = await runWithTimeout(
-          () => kind.execute(stage.stageId, stageCtx),
-          timeoutMs,
-          job.signal,
-        );
+        // 回滚走 rollback() 而不是 execute()：发布阶段会切到当前版本，
+        // 拿它做回滚等于什么都没做。
+        const runStage = (): Promise<StageResult> => {
+          if (!isRollback) return kind.execute(stage.stageId, stageCtx);
+          if (kind.rollback === undefined) {
+            throw new Error(`${kind.manifest.displayName} 没有实现 rollback()`);
+          }
+          return kind.rollback(stageCtx);
+        };
+        const timeoutMs = isRollback ? 60_000 : declared?.timeoutMs;
+        const result = await runWithTimeout(runStage, timeoutMs, job.signal);
         Object.assign(outputs, result.outputs ?? {});
         finishStage(db, releaseId, stage.stageId, stage.attempt, 'success');
         job.log(`[${stageName}] 成功`);
@@ -147,8 +154,11 @@ export async function executeRelease(deps: ExecuteDeps, job: JobContext): Promis
       return;
     }
 
-    // 结果验证：声明支持时必须执行，不通过则不进入成功状态
-    if (kind.manifest.capabilities.verify && kind.verify !== undefined) {
+    // 结果验证：声明支持时必须执行，不通过则不进入成功状态。
+    // 回滚不跑 verify——它验的是「刚发布的版本生效了」，而回滚的目标
+    // 是旧版本，断言会反过来失败。
+    const isRollbackRelease = todo.some((s) => s.stageId === ROLLBACK_STAGE_ID);
+    if (!isRollbackRelease && kind.manifest.capabilities.verify && kind.verify !== undefined) {
       job.log('验证发布结果');
       const verified = await kind.verify(managed.ctx);
       job.log(`验证：${verified.message}`);
@@ -162,6 +172,26 @@ export async function executeRelease(deps: ExecuteDeps, job: JobContext): Promis
       job.log(`平台回执：${JSON.stringify(outputs)}`);
     }
     setReleaseStatus(db, releaseId, 'success');
+  } catch (error) {
+    // 阶段之外的失败也必须落地：最常见的是产物下载失败（链接过期、摘要
+    // 不符）。不在这里标记的话，发布记录会永久停在 running——界面一直
+    // 显示「执行中」，而重试入口因为状态是 running 根本不出现。
+    const message = error instanceof Error ? error.message : String(error);
+    job.log(`[失败] ${message}`);
+
+    // 还没开始的阶段标为跳过，让界面能看出执行到哪一步就断了
+    for (const stage of getRelease(db, releaseId).stages) {
+      if (stage.status === 'queued' || stage.status === 'running') {
+        finishStage(db, releaseId, stage.stageId, stage.attempt, 'skipped');
+      }
+    }
+
+    const current = getRelease(db, releaseId);
+    if (current.status === 'running' || current.status === 'queued') {
+      setReleaseStatus(db, releaseId, /超时|timeout/i.test(message) ? 'timeout' : 'failed');
+    }
+    // 重新抛出：任务层也要知道这次失败了
+    throw error;
   } finally {
     // 凭据文件先单独删一遍：整个工作目录的删除可能因文件被占用而失败，
     // 而密钥文件必须确保消失。

@@ -16,6 +16,7 @@ import type { Db } from '../db/index.js';
 import { createTarget, listTargets } from '../targets/index.js';
 import type { RuntimeConfig } from '../shared/config.js';
 import { toHttpError } from './errors.js';
+import { handleUi } from './ui-routes.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -66,6 +67,9 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: WebDeps): 
   const url = new URL(req.url ?? '/', 'http://localhost');
   const path = url.pathname;
   const method = req.method ?? 'GET';
+
+  // 页面路由优先：它自己处理未登录（跳登录页而不是回 JSON 401）
+  if (await handleUi(req, res, deps)) return;
 
   /* ------------------------------ 公开端点 ------------------------------ */
 

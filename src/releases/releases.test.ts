@@ -459,6 +459,123 @@ describe('阶段超时', () => {
   });
 });
 
+describe('阶段之外的失败也要落地', () => {
+  it('产物下载失败时记录标为失败，而不是永久停在执行中', async () => {
+    // 这是 12.3 演练里发现的 bug：prepareArtifact 抛异常时直接跳到
+    // finally 清理，发布记录停在 running——界面一直显示「执行中」，
+    // 重试入口因为状态是 running 根本不出现。
+    const observation = freshObservation();
+    registerTargetKind(createEchoPlugin(observation));
+
+    const db = open({ file: ':memory:' });
+    try {
+      ensureSchema(db);
+      const game = createGame(db, { slug: 'demo', displayName: '示例' });
+      createPackageType(db, { id: 'echo-pkg', displayName: 'Echo' });
+      const target = createTarget(
+        db,
+        { gameId: game.id, kind: 'echo', name: 'T', location: { slot: 'a' } },
+        KEY,
+      );
+
+      const buildPk = randomUUID();
+      // 指向一个连不上的地址
+      db.prepare(
+        `INSERT INTO builds (id, game_id, package_type_id, build_id, artifact_url, size_bytes, sha256, reported_at)
+         VALUES (?, ?, 'echo-pkg', 'dead', 'http://127.0.0.1:1/gone.zip', 1, ?, ?)`,
+      ).run(buildPk, game.id, 'a'.repeat(64), new Date().toISOString());
+
+      const release = createRelease(db, {
+        buildId: buildPk,
+        targetId: target.id,
+        params: { version: '1.0.0' },
+        stageIds: ['upload', 'submit'],
+      });
+
+      const runner = startRunner({
+        db,
+        handlers: {
+          publish: (job) =>
+            executeRelease(
+              { db, masterKey: KEY, cliHome: '/opt/cli', workParentDir: scratch },
+              job,
+            ),
+        },
+      });
+      try {
+        enqueue(db, 'publish', release.id);
+        await runner.tick();
+      } finally {
+        runner.stop();
+      }
+
+      const finished = getRelease(db, release.id);
+      assert.equal(finished.status, 'failed', '记录不能停在 running');
+      assert.deepEqual(
+        finished.stages.map((s) => s.status),
+        ['skipped', 'skipped'],
+        '一个阶段都没跑起来，都该标为跳过',
+      );
+      assert.equal(observation.stagesRun.length, 0, '插件不该被调用');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('摘要不符时同样标为失败', async () => {
+    const observation = freshObservation();
+    registerTargetKind(createEchoPlugin(observation));
+
+    const db = open({ file: ':memory:' });
+    try {
+      ensureSchema(db);
+      const game = createGame(db, { slug: 'demo', displayName: '示例' });
+      createPackageType(db, { id: 'echo-pkg', displayName: 'Echo' });
+      const target = createTarget(
+        db,
+        { gameId: game.id, kind: 'echo', name: 'T', location: { slot: 'a' } },
+        KEY,
+      );
+
+      const buildPk = randomUUID();
+      // 产物源是好的，但摘要故意写错
+      db.prepare(
+        `INSERT INTO builds (id, game_id, package_type_id, build_id, artifact_url, size_bytes, sha256, reported_at)
+         VALUES (?, ?, 'echo-pkg', 'bad-sha', ?, ?, ?, ?)`,
+      ).run(buildPk, game.id, `${base}/pkg.zip`, zipBody.length, 'f'.repeat(64), new Date().toISOString());
+
+      const release = createRelease(db, {
+        buildId: buildPk,
+        targetId: target.id,
+        params: { version: '1.0.0' },
+        stageIds: ['upload', 'submit'],
+      });
+
+      const runner = startRunner({
+        db,
+        handlers: {
+          publish: (job) =>
+            executeRelease(
+              { db, masterKey: KEY, cliHome: '/opt/cli', workParentDir: scratch },
+              job,
+            ),
+        },
+      });
+      try {
+        enqueue(db, 'publish', release.id);
+        await runner.tick();
+      } finally {
+        runner.stop();
+      }
+
+      assert.equal(getRelease(db, release.id).status, 'failed');
+      assert.equal(observation.stagesRun.length, 0, '摘要不符时不该把产物交给插件');
+    } finally {
+      db.close();
+    }
+  });
+});
+
 describe('发布记录', () => {
   it('创建时就建出所有阶段，界面能显示将要执行哪几步', () => {
     const db = open({ file: ':memory:' });

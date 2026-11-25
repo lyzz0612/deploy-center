@@ -45,12 +45,17 @@ export async function seedClis(db: Db, cliHome: string): Promise<SeedResult> {
       continue;
     }
 
-    const pending = [
-      ...listJobs(db, { kind: 'cli_install', refId: spec.id, status: 'queued' }),
-      ...listJobs(db, { kind: 'cli_install', refId: spec.id, status: 'running' }),
-    ];
-    if (pending.length > 0) {
-      skipped.push({ cliId: spec.id, reason: '已有待执行的安装任务' });
+    // 已经投递过就不再投，**包括失败过的**。
+    //
+    // 只看 queued/running 的话，每次重启都会给失败过的 CLI 再投一条：
+    // 容器重启几次就堆几条失败任务，而失败原因（比如网络不通）通常不会
+    // 因为重启而改变。失败后由用户在设置页手动点重装，那时他能看到原因。
+    const attempted = listJobs(db, { kind: 'cli_install', refId: spec.id, limit: 1 });
+    if (attempted.length > 0) {
+      skipped.push({
+        cliId: spec.id,
+        reason: `已投递过安装任务（最近一次 ${attempted[0]!.status}）`,
+      });
       continue;
     }
 

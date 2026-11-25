@@ -10,7 +10,7 @@ import { databaseFile, ensureSchema, open, type Db } from './db/index.js';
 import { startRunner, type JobHandler, type JobKind } from './jobs/index.js';
 import { registerAllPlugins } from './plugins/index.js';
 import { runSelfCheck } from './registry/index.js';
-import { executeRelease } from './releases/index.js';
+import { executeRelease, recoverRelease } from './releases/index.js';
 import { loadConfig, type RuntimeConfig } from './shared/config.js';
 import { isEntrypoint } from './shared/entrypoint.js';
 import { startWeb } from './web/server.js';
@@ -67,7 +67,24 @@ export function main(): void {
     console.warn(`[warn] [${warning.where}] ${warning.message}`);
   }
 
-  const runner = startRunner({ db, handlers: buildHandlers(db, config) });
+  const runner = startRunner({
+    db,
+    handlers: buildHandlers(db, config),
+    // 任务被中断时，它关联的发布记录也停在 running，必须一并收拾：
+    // 否则界面上那条发布会永远显示「执行中」，连重试入口都不出现。
+    onRecovered: (jobs) => {
+      for (const job of jobs) {
+        if (job.kind !== 'publish') continue;
+        const recovered = recoverRelease(db, job.refId);
+        if (recovered !== null) {
+          console.warn(
+            `[warn] 发布 ${recovered.releaseId} 因进程中断标记为失败` +
+              `${recovered.interruptedStage === null ? '' : `（中断于 ${recovered.interruptedStage} 阶段）`}`,
+          );
+        }
+      }
+    },
+  });
 
   const sessions = createSessionStore();
   const server = startWeb({ config, db, sessions });

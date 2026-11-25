@@ -67,7 +67,7 @@
 
 - **运行时**：Node.js 22 + TypeScript
 - **数据**：SQLite（WAL）
-- **前端**：React + Vite
+- **界面**：服务端渲染 HTML（不是 SPA，理由见 design.md D9）
 - **部署**：Docker Compose（单个服务 + 数据卷 + CLI 卷）
 - **变更管理**：[OpenSpec](https://github.com/Fission-AI/OpenSpec)
 
@@ -77,15 +77,20 @@
 
 ## 当前状态
 
-本项目处于**规划阶段**：架构、领域模型与插件契约已经定稿，尚无任何可运行代码。
+核心链路已实现并经真实验证。**尚未在真实 Docker 主机上部署过，微信的真实上传也未验证**（需要小游戏账号与代码上传密钥）。
 
 | 方面 | 状态 |
 | --- | --- |
-| 架构与领域模型 | 已完成，见 `openspec/changes/add-publish-console/design.md` |
-| 能力规格（6 项） | 已完成并通过 `openspec validate --strict` |
-| 实施任务清单 | 已完成，共 12 组 41 项 |
-| 可运行代码 | 未开始 |
-| 部署文档 | 随实施产出 |
+| 架构、领域模型、插件契约 | 已定稿并实现 |
+| 能力规格（6 项） | 通过 `openspec validate --strict` |
+| 实施进度 | 43/46 任务 |
+| 测试 | 429 个通过 |
+| CI 上报 → 构建列表 | 已实测（含幂等、按 commit 聚合） |
+| H5 发布 → 外部 URL 验证 → 回滚 | 已实测（真实 HTTP 访问） |
+| 失败重试、进程中断恢复 | 已实测 |
+| 平台 CLI 安装与三层探测 | 已实测（两个真实 CLI） |
+| 微信真实上传 | **未验证**，插件集成用 stub CLI 验过 |
+| Docker 部署 | **未验证**，本机无 Docker |
 
 <p align="right">(<a href="#readme-top">返回顶部</a>)</p>
 
@@ -93,7 +98,7 @@
 
 ## 快速开始
 
-> 以下步骤描述的是目标形态，实施完成后才可执行。
+> `docker compose up` 这条路径尚未在真实 Docker 主机上验证过。本机验证走的是直接跑 `node dist/main.js`，进程行为相同。完整部署说明见 [deploy.md](docs/deploy.md)。
 
 ### 前置要求
 
@@ -122,17 +127,17 @@ docker compose up -d
 ## 路线图
 
 - [x] 架构、领域模型与插件契约设计
-- [ ] 工程骨架：单服务 compose、SQLite 建表、鉴权
-- [ ] 数据层与注册表、启动自检
-- [ ] 凭据管理（类型化、加密、引用保护）
-- [ ] 游戏与包类型管理
-- [ ] CI 上报接口与构建视图
-- [ ] 任务执行器（多阶段、重试、超时、中断恢复）
-- [ ] CLI 安装与三层可用性探测
-- [ ] 微信插件（第一个真实平台）
-- [ ] H5 目标插件
-- [ ] 中控台界面
-- [ ] 端到端部署验证
+- [x] 工程骨架：单服务 compose、SQLite 建表、鉴权
+- [x] 数据层与注册表、启动自检
+- [x] 凭据管理（类型化、加密、引用保护）
+- [x] 游戏与包类型管理
+- [x] CI 上报接口与构建视图
+- [x] 任务执行器（多阶段、重试、超时、中断恢复）
+- [x] CLI 安装与三层可用性探测
+- [x] 微信插件（真实上传待验证）
+- [x] H5 目标插件（发布与回滚已实测）
+- [x] 中控台界面
+- [ ] Docker 主机上的端到端部署验证
 
 完整任务与验证方式见 [tasks.md](openspec/changes/add-publish-console/tasks.md)。
 
@@ -148,6 +153,12 @@ docker compose up -d
 | [design.md](openspec/changes/add-publish-console/design.md) | 技术决策、领域模型、插件契约、风险与部署顺序 |
 | [tasks.md](openspec/changes/add-publish-console/tasks.md) | 12 组实施任务，每项带验证方式 |
 | [specs/](openspec/changes/add-publish-console/specs/publish-console/) | 6 项能力的行为契约：游戏与包类型、凭据、构建上报、发布目标、发布执行、CLI 管理 |
+| [deploy.md](docs/deploy.md) | 部署步骤、备份、升级，以及故障演练的实测结果 |
+| [ci-report.md](docs/ci-report.md) | CI 接入：上报接口的字段、幂等规则与 GitHub Actions 示例 |
+| [add-a-target-kind.md](docs/add-a-target-kind.md) | 新增一个发布目标类型的五步，以及自检会替你挡住什么 |
+| [cli-management.md](docs/cli-management.md) | 平台 CLI 的安装、三层探测与跨平台实现细节 |
+| [auth.md](docs/auth.md) | 三种秘密的分工、两条鉴权入口，以及主密钥的威胁模型 |
+| [spike-douyin-cli.md](docs/spike-douyin-cli.md) | 抖音 CLI 的容器可用性调查与会话模型 |
 
 <p align="right">(<a href="#readme-top">返回顶部</a>)</p>
 
@@ -189,7 +200,7 @@ docker compose up -d
 
 <!-- MARKDOWN LINKS & IMAGES -->
 
-[status-shield]: https://img.shields.io/badge/status-planning-yellow
+[status-shield]: https://img.shields.io/badge/status-alpha-blue
 [status-url]: openspec/changes/add-publish-console/proposal.md
 [node-shield]: https://img.shields.io/badge/node-%3E%3D22-339933?logo=nodedotjs&logoColor=white
 [node-url]: https://nodejs.org/

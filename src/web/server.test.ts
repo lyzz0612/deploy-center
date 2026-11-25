@@ -34,6 +34,17 @@ after(async () => {
   db.close();
 });
 
+/**
+ * 设一个口令，不依赖当前状态。
+ *
+ * 这些测试共用一个 db，而 setPassword 在已设口令时要求提供当前口令。
+ * 先清再设，让每条测试都不依赖执行顺序。
+ */
+function resetPassword(password: string): void {
+  db.prepare('UPDATE settings SET password_hash = NULL WHERE id = 1').run();
+  setPassword(db, password, undefined);
+}
+
 describe('公开端点', () => {
   it('健康检查返回 200', async () => {
     const res = await fetch(`${base}/healthz`);
@@ -41,9 +52,33 @@ describe('公开端点', () => {
     assert.deepEqual(await res.json(), { status: 'ok' });
   });
 
-  it('未知路径返回 404', async () => {
+  it('未知 API 路径返回 404', async () => {
+    const res = await fetch(`${base}/api/no-such-endpoint`, {
+      headers: { 'x-ci-key': 'bogus' },
+    });
+    // 无效 CI key 先被拦住，说明 /api/* 没有被页面路由吞掉
+    assert.equal(res.status, 401);
+  });
+
+  it('未设口令时任何页面都导向首次设置', async () => {
+    db.prepare('UPDATE settings SET password_hash = NULL WHERE id = 1').run();
+    try {
+      const res = await fetch(`${base}/nope`);
+      assert.match(res.headers.get('content-type') ?? '', /text\/html/);
+      assert.match(await res.text(), /首次设置/, '没有口令时该引导设置，而不是给登录框');
+    } finally {
+      // 恢复，避免影响其他共用这个 db 的测试
+      resetPassword('restored-after-setup-check');
+    }
+  });
+
+  it('已设口令但未登录时，页面路径给登录页而不是一段 JSON', async () => {
+    resetPassword('page-route-password');
+
     const res = await fetch(`${base}/nope`);
-    assert.equal(res.status, 404);
+    assert.equal(res.status, 401);
+    assert.match(res.headers.get('content-type') ?? '', /text\/html/);
+    assert.match(await res.text(), /管理员口令/);
   });
 });
 
@@ -63,7 +98,7 @@ describe('管理 API 鉴权', () => {
   });
 
   it('口令登录后可访问管理 API', async () => {
-    setPassword(db, 'admin-password-1');
+    resetPassword('admin-password-1');
 
     const bad = await fetch(`${base}/api/auth/login`, {
       method: 'POST',
@@ -163,8 +198,7 @@ describe('CI 上报：包类型校验', () => {
 describe('构建列表接口', () => {
   async function adminCookie(): Promise<string> {
     const password = 'builds-list-password';
-    db.prepare('UPDATE settings SET password_hash = NULL WHERE id = 1').run();
-    setPassword(db, password, undefined);
+    resetPassword(password);
     const login = await fetch(`${base}/api/auth/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -224,8 +258,7 @@ describe('CI 上报鉴权', () => {
   it('会话不能当 CI key 用', async () => {
     // 不依赖其他测试是否设过口令：直接清掉再设，避免测试间顺序耦合。
     const password = 'cross-check-password';
-    db.prepare('UPDATE settings SET password_hash = NULL WHERE id = 1').run();
-    setPassword(db, password, undefined);
+    resetPassword(password);
 
     const login = await fetch(`${base}/api/auth/login`, {
       method: 'POST',

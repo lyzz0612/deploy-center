@@ -27,6 +27,13 @@ export interface RunnerOptions {
   readonly pollIntervalMs?: number;
   /** 单个任务的超时（毫秒）。缺省 30 分钟。 */
   readonly timeoutMs?: number;
+  /**
+   * 启动时发现被中断的任务后调用。
+   *
+   * 任务自己已被标为失败，但它关联的记录（发布记录与阶段）也停在
+   * 中断时的状态，需要调用方一并收拾——否则界面上会永远显示「执行中」。
+   */
+  readonly onRecovered?: (jobs: readonly Job[]) => void;
 }
 
 export interface RunnerHandle {
@@ -133,8 +140,9 @@ export function startRunner(options: RunnerOptions): RunnerHandle {
 
   // 启动时先清理上次中断留下的 running 任务，再开始领新任务。
   const recovered = recoverInterrupted(db);
-  if (recovered > 0) {
-    console.warn(`[warn] ${recovered} 个任务在上次运行中被中断，已标记为失败`);
+  if (recovered.length > 0) {
+    console.warn(`[warn] ${recovered.length} 个任务在上次运行中被中断，已标记为失败`);
+    options.onRecovered?.(recovered);
   }
 
   void loop();

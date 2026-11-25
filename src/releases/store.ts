@@ -108,11 +108,20 @@ function toRelease(db: Db, row: ReleaseRow): Release {
   };
 }
 
+/**
+ * 回滚专用的阶段 id。
+ *
+ * 回滚不是「再跑一遍发布阶段」：h5 的 activate 阶段会切到**当前**版本，
+ * 用它做回滚等于什么都没做。所以回滚是一条独立的发布记录，只有这一个
+ * 阶段，由核心调插件的 rollback() 而不是 execute()。
+ */
+export const ROLLBACK_STAGE_ID = '__rollback__';
+
 export interface CreateReleaseInput {
   readonly buildId: string;
   readonly targetId: string;
   readonly params: Record<string, unknown>;
-  /** 声明的阶段，按顺序。 */
+  /** 声明的阶段，按顺序。回滚时传 `[ROLLBACK_STAGE_ID]`。 */
   readonly stageIds: readonly string[];
   readonly createdBy?: string;
 }
