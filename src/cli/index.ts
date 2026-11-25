@@ -33,5 +33,3 @@ export {
   type CliRegistry,
   type InstalledVersion,
 } from './registry-file.js';
-
-export { seedClis, type SeedResult } from './seed.js';

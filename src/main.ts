@@ -5,7 +5,7 @@ import process from 'node:process';
 
 import { createSessionStore } from './auth/session.js';
 import { seedPackageTypes } from './catalog/index.js';
-import { installCli, seedClis } from './cli/index.js';
+import { installCli } from './cli/index.js';
 import { databaseFile, ensureSchema, open, type Db } from './db/index.js';
 import { startRunner, type JobHandler, type JobKind } from './jobs/index.js';
 import { registerAllPlugins } from './plugins/index.js';
@@ -90,19 +90,9 @@ export function main(): void {
   const server = startWeb({ config, db, sessions });
   console.log('job runner started');
 
-  // 预置安装：CLI 卷为空时投递安装任务。异步进行，不阻塞启动——npm i 是
-  // 分钟级操作，同步装会让健康检查判容器失败然后反复重启。
-  void seedClis(db, config.cliHome)
-    .then((result) => {
-      for (const cliId of result.queued) {
-        console.log(`已投递 ${cliId} 的安装任务`);
-      }
-    })
-    .catch((error: unknown) => {
-      console.warn(
-        `[warn] CLI 预置检查失败：${error instanceof Error ? error.message : String(error)}`,
-      );
-    });
+  // 刻意不在启动时自动装 CLI：两个平台 CLI 加起来 283 MB，而一个只发 H5
+  // 的部署根本用不到它们。装不装由用户在设置页决定（装 → 验 → 用都在
+  // 后台可见）。
 
   const shutdown = (): void => {
     runner.stop();

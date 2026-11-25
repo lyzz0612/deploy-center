@@ -12,7 +12,6 @@ import { checkKind } from './checks.js';
 import { currentPrefix, npmCliPath, run, versionPrefix } from './install.js';
 import { probeCli } from './probe.js';
 import { readRegistry, recordInstall, registryPath, switchVersion, writeRegistry } from './registry-file.js';
-import { seedClis } from './seed.js';
 
 const scratch = mkdtempSync(join(tmpdir(), 'cli-test-'));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -267,84 +266,6 @@ describe('类型级与实例级分离', () => {
   });
 });
 
-describe('首启预置', () => {
-  it('CLI 卷为空时为每个 npm 型 CLI 投递安装任务', async () => {
-    const db = freshDb();
-    try {
-      const result = await seedClis(db, freshHome());
-      assert.ok(result.queued.includes('miniprogram-ci'));
-      assert.ok(result.queued.includes('tt-minigame-ide-cli'));
-
-      const jobs = listJobs(db, { kind: 'cli_install' });
-      assert.equal(jobs.length, result.queued.length);
-      assert.equal(jobs.every((j) => j.status === 'queued'), true);
-    } finally {
-      db.close();
-    }
-  });
-
-  it('已安装的跳过', async () => {
-    const db = freshDb();
-    try {
-      const home = freshHome();
-      await recordInstall(home, 'miniprogram-ci', '2.1.31', 'npm');
-
-      const result = await seedClis(db, home);
-      assert.equal(result.queued.includes('miniprogram-ci'), false);
-      assert.ok(
-        result.skipped.some((s) => s.cliId === 'miniprogram-ci' && /已安装 2\.1\.31/.test(s.reason)),
-      );
-    } finally {
-      db.close();
-    }
-  });
-
-  it('重复调用不堆出一串同样的任务', async () => {
-    const db = freshDb();
-    try {
-      const home = freshHome();
-      await seedClis(db, home);
-      const firstCount = listJobs(db, { kind: 'cli_install' }).length;
-
-      await seedClis(db, home);
-      assert.equal(
-        listJobs(db, { kind: 'cli_install' }).length,
-        firstCount,
-        '已有待执行任务时不应重复投递',
-      );
-    } finally {
-      db.close();
-    }
-  });
-
-  it('失败过的也不再自动重投（否则重启几次就堆几条）', async () => {
-    const db = freshDb();
-    try {
-      const home = freshHome();
-      await seedClis(db, home);
-
-      // 把全部安装任务标为失败，模拟「网络不通装不上」
-      const jobs = listJobs(db, { kind: 'cli_install' });
-      for (const job of jobs) {
-        db.prepare("UPDATE jobs SET status = 'failed', error = '网络不通' WHERE id = ?").run(job.id);
-      }
-
-      const result = await seedClis(db, home);
-      assert.deepEqual(result.queued, [], '失败过的不该自动重投');
-      assert.equal(
-        listJobs(db, { kind: 'cli_install' }).length,
-        jobs.length,
-        '任务数不该增长——失败原因通常不会因为重启而改变',
-      );
-      assert.ok(
-        result.skipped.some((s) => /最近一次 failed/.test(s.reason)),
-        '跳过原因要说清是因为已经试过了',
-      );
-    } finally {
-      db.close();
-    }
-  });
-});
 
 describe('npm 调用方式（跨平台）', () => {
   it('能定位到 npm 的 JS 入口', async () => {
