@@ -46,7 +46,6 @@ function flashNotice(flash: SettingsFlash): Html {
 /* --------------------------------- CI key --------------------------------- */
 
 function keyCard(key: CiKeySummary): Html {
-  const revoked = key.revokedAt !== null;
   const valueCell =
     key.value === null
       ? html`<p class="subtle" style="margin:10px 0 0">
@@ -65,9 +64,6 @@ function keyCard(key: CiKeySummary): Html {
         <div>
           <div class="key-title">
             <strong>${key.name}</strong>
-            ${revoked
-              ? html`<span class="badge muted">已吊销</span>`
-              : html`<span class="badge ok">可用</span>`}
           </div>
           <div class="key-meta">
             <span>创建 ${shortTime(key.createdAt)}</span>
@@ -76,49 +72,45 @@ function keyCard(key: CiKeySummary): Html {
           </div>
         </div>
         <div class="key-actions">
-          ${revoked
-            ? html``
-            : html`
-                <form method="post" action="/settings/ci-keys/${key.id}/revoke">
-                  <button class="btn danger small" type="submit">吊销</button>
-                </form>
-              `}
+          <form
+            method="post"
+            action="/settings/ci-keys/${key.id}/delete"
+            data-confirm="删除「${key.name}」？用它上报的 CI 会立即开始失败，且不可恢复。"
+          >
+            <button class="btn danger small" type="submit">删除</button>
+          </form>
         </div>
       </div>
 
       ${valueCell}
 
-      ${revoked
-        ? html``
-        : html`
-            <details class="key-edit">
-              <summary class="btn secondary small">更换值 / 改名</summary>
-              <div class="key-edit-body">
-                <form method="post" action="/settings/ci-keys/${key.id}">
-                  <div class="form-grid">
-                    <div class="field">
-                      <label>名称</label>
-                      <input type="text" name="name" value="${key.name}" required>
-                    </div>
-                    <div class="field">
-                      <label>新的 key 值</label>
-                      <input
-                        type="text"
-                        name="value"
-                        placeholder="留空表示不改值"
-                        autocomplete="off"
-                        spellcheck="false"
-                      >
-                      <span class="hint">至少 8 个字符。保存后旧值立即失效。</span>
-                    </div>
-                  </div>
-                  <div class="form-actions" style="margin-top:16px;padding-top:14px">
-                    <button class="btn" type="submit">保存</button>
-                  </div>
-                </form>
+      <details class="key-edit">
+        <summary class="btn secondary small">更换值 / 改名</summary>
+        <div class="key-edit-body">
+          <form method="post" action="/settings/ci-keys/${key.id}">
+            <div class="form-grid">
+              <div class="field">
+                <label>名称</label>
+                <input type="text" name="name" value="${key.name}" required>
               </div>
-            </details>
-          `}
+              <div class="field">
+                <label>新的 key 值</label>
+                <input
+                  type="text"
+                  name="value"
+                  placeholder="留空表示不改值"
+                  autocomplete="off"
+                  spellcheck="false"
+                >
+                <span class="hint">至少 8 个字符。保存后旧值立即失效。</span>
+              </div>
+            </div>
+            <div class="form-actions" style="margin-top:16px;padding-top:14px">
+              <button class="btn" type="submit">保存</button>
+            </div>
+          </form>
+        </div>
+      </details>
     </div>
   `;
 }
@@ -130,7 +122,7 @@ export function ciKeysPage(db: Db, masterKey: string, flash: SettingsFlash = {})
     ${pageHeader({
       title: 'CI key',
       lead: html`给 CI 上报构建用。<strong>值加密保存在本机</strong>，随时可以复制、改名或替换——
-        自用后台不需要「只显示一次」的仪式。`,
+        自用后台不需要「只显示一次」的仪式。不用了直接删除，列表里不留已失效的记录。`,
     })}
     ${flashNotice(flash)}
 

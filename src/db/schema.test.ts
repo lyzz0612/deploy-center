@@ -123,7 +123,8 @@ describe('结构升级', () => {
   it('v3 的库缺少 token_encrypted 时补齐该列，且保留已有数据', () => {
     const db = open({ file: ':memory:' });
     try {
-      // 造一个 v3 的 ci_keys：没有 token_encrypted 列
+      // 造一个 v3 的库：ci_keys 没有 token_encrypted 列。
+      // builds 一并建出来，因为 v3 → v5 要连跳两步，而 v5 那步会动 builds。
       db.exec(
         `CREATE TABLE ci_keys (
            id           TEXT PRIMARY KEY,
@@ -133,6 +134,27 @@ describe('结构升级', () => {
            created_at   TEXT NOT NULL,
            last_used_at TEXT,
            revoked_at   TEXT
+         );
+         CREATE TABLE games (
+           id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE,
+           display_name TEXT NOT NULL, created_at TEXT NOT NULL, archived_at TEXT
+         );
+         CREATE TABLE package_types (
+           id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
+           created_at TEXT NOT NULL, archived_at TEXT
+         );
+         CREATE TABLE builds (
+           id              TEXT PRIMARY KEY,
+           game_id         TEXT NOT NULL REFERENCES games(id),
+           package_type_id TEXT NOT NULL REFERENCES package_types(id),
+           build_id        TEXT NOT NULL,
+           artifact_url    TEXT NOT NULL,
+           size_bytes      INTEGER NOT NULL,
+           sha256          TEXT NOT NULL,
+           commit_sha      TEXT,
+           description     TEXT,
+           reported_at     TEXT NOT NULL,
+           ci_key_id       TEXT REFERENCES ci_keys(id)
          )`,
       );
       db.prepare(
@@ -157,6 +179,96 @@ describe('结构升级', () => {
         .get('legacy');
       assert.equal(row?.name, '旧 key');
       assert.equal(row?.token_encrypted, null, '老记录没有原文，应为 NULL 而不是假数据');
+      assert.equal(
+        columns.some((column) => column.name === 'revoked_at'),
+        false,
+        'v3 的库也要一路升到 v5，revoked_at 应已去掉',
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  it('v4 → v5：去掉 revoked_at，已吊销的 key 真的被删掉', () => {
+    const db = open({ file: ':memory:' });
+    try {
+      // 造一个 v4 的库：ci_keys 带 revoked_at，builds 引用其中一条
+      db.exec(
+        `CREATE TABLE ci_keys (
+           id              TEXT PRIMARY KEY,
+           name            TEXT NOT NULL,
+           prefix          TEXT NOT NULL,
+           token_hash      TEXT NOT NULL UNIQUE,
+           token_encrypted BLOB,
+           created_at      TEXT NOT NULL,
+           last_used_at    TEXT,
+           revoked_at      TEXT
+         );
+         CREATE TABLE games (
+           id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE,
+           display_name TEXT NOT NULL, created_at TEXT NOT NULL, archived_at TEXT
+         );
+         CREATE TABLE package_types (
+           id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
+           created_at TEXT NOT NULL, archived_at TEXT
+         );
+         CREATE TABLE builds (
+           id              TEXT PRIMARY KEY,
+           game_id         TEXT NOT NULL REFERENCES games(id),
+           package_type_id TEXT NOT NULL REFERENCES package_types(id),
+           build_id        TEXT NOT NULL,
+           artifact_url    TEXT NOT NULL,
+           size_bytes      INTEGER NOT NULL,
+           sha256          TEXT NOT NULL,
+           commit_sha      TEXT,
+           description     TEXT,
+           reported_at     TEXT NOT NULL,
+           ci_key_id       TEXT REFERENCES ci_keys(id)
+         )`,
+      );
+
+      const insertKey = db.prepare(
+        `INSERT INTO ci_keys (id, name, prefix, token_hash, created_at, revoked_at)
+         VALUES (?, ?, 'mgc_xxxx', ?, ?, ?)`,
+      );
+      insertKey.run('live', '在用', 'a'.repeat(64), now(), null);
+      insertKey.run('dead', '已吊销', 'b'.repeat(64), now(), now());
+
+      db.prepare('INSERT INTO games VALUES (?,?,?,?,NULL)').run('g1', 'demo', 'Demo', now());
+      db.prepare('INSERT INTO package_types VALUES (?,?,?,NULL)').run('h5', 'H5', now());
+      const insertBuild = db.prepare(
+        `INSERT INTO builds (id, game_id, package_type_id, build_id, artifact_url,
+                             size_bytes, sha256, reported_at, ci_key_id)
+         VALUES (?, 'g1', 'h5', ?, 'https://x/a.zip', 1, 'h', ?, ?)`,
+      );
+      insertBuild.run('b-live', 'r1', now(), 'live');
+      insertBuild.run('b-dead', 'r2', now(), 'dead');
+      db.pragma('user_version = 4');
+
+      const result = ensureSchema(db);
+      assert.equal(result.previousVersion, 4);
+      assert.equal(result.version, SCHEMA_VERSION);
+
+      const columns = db.pragma('table_info(ci_keys)') as Array<{ name: string }>;
+      assert.equal(
+        columns.some((column) => column.name === 'revoked_at'),
+        false,
+        '升级后不该再有 revoked_at 列',
+      );
+
+      const keys = db.prepare<[], { id: string }>('SELECT id FROM ci_keys').all();
+      assert.deepEqual(keys.map((k) => k.id), ['live'], '已吊销的 key 应被真的删掉');
+
+      // 构建记录两条都保留：它们是 CI 上报的事实
+      const builds = db
+        .prepare<[], { id: string; ci_key_id: string | null }>(
+          'SELECT id, ci_key_id FROM builds ORDER BY id',
+        )
+        .all();
+      assert.deepEqual(builds, [
+        { id: 'b-dead', ci_key_id: null },
+        { id: 'b-live', ci_key_id: 'live' },
+      ]);
     } finally {
       db.close();
     }

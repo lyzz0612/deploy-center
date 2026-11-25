@@ -18,7 +18,7 @@
  */
 
 /** 当前结构版本。改 DDL 必须同时递增，并在 MIGRATIONS 里补一步。 */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /**
  * 建表语句。顺序即依赖顺序（被引用的表在前）。
@@ -40,6 +40,10 @@ export const DDL: readonly string[] = [
   //
   // token_encrypted 允许为空：v3 之前签发的老记录没有原文，界面会提示
   // 重新设置一个新值，而不是假装它还能取回。
+  //
+  // 没有 revoked_at：不再用的 key 直接删除（v5）。软删除在这里只剩坏处——
+  // 列表里留着一条永远不能用、不能改的记录，而「它曾经存在」这件事对
+  // 自用后台没有价值。要换值就改值，旧值当场失效，不必另留一条墓碑。
   `CREATE TABLE IF NOT EXISTS ci_keys (
      id              TEXT PRIMARY KEY,
      name            TEXT NOT NULL,
@@ -47,8 +51,7 @@ export const DDL: readonly string[] = [
      token_hash      TEXT NOT NULL UNIQUE,
      token_encrypted BLOB,
      created_at      TEXT NOT NULL,
-     last_used_at    TEXT,
-     revoked_at      TEXT
+     last_used_at    TEXT
    )`,
 
   /* -------------------------------- 全局数据 -------------------------------- */
@@ -236,6 +239,21 @@ export const MIGRATIONS: readonly Migration[] = [
     // v3 → v4：CI key 增加可逆密文列，用于在设置页随时查看与替换。
     version: 4,
     statements: ['ALTER TABLE ci_keys ADD COLUMN token_encrypted BLOB'],
+  },
+  {
+    // v4 → v5：吊销改为直接删除，去掉 revoked_at。
+    //
+    // 顺序是必须的：先把已吊销 key 在 builds 上的引用置空，再删记录，
+    // 最后才去掉列。反过来做会撞上外键，或者把「哪些是已吊销的」这个
+    // 判据先丢掉。构建记录本身不删——它是 CI 上报的事实，只是不再知道
+    // 当初由哪条 key 上报。
+    version: 5,
+    statements: [
+      `UPDATE builds SET ci_key_id = NULL
+         WHERE ci_key_id IN (SELECT id FROM ci_keys WHERE revoked_at IS NOT NULL)`,
+      'DELETE FROM ci_keys WHERE revoked_at IS NOT NULL',
+      'ALTER TABLE ci_keys DROP COLUMN revoked_at',
+    ],
   },
 ];
 

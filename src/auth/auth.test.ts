@@ -6,10 +6,10 @@ import { hashPassword, verifyPassword } from '../shared/hash.js';
 import { createSessionStore } from './session.js';
 import {
   checkPassword,
+  deleteCiKey,
   isPasswordSet,
   issueCiKey,
   listCiKeys,
-  revokeCiKey,
   setPassword,
   updateCiKey,
   verifyCiKey,
@@ -135,6 +135,24 @@ describe('CI key', () => {
     }
   });
 
+  it('新建时撞上已有的 key 值，给人话而不是 SQL 报错', () => {
+    const db = freshDb();
+    try {
+      issueCiKey(db, 'first', MASTER_KEY, 'same-ci-key-value-01');
+      assert.throws(
+        () => issueCiKey(db, 'second', MASTER_KEY, 'same-ci-key-value-01'),
+        /已被另一条记录使用/,
+      );
+      // 界面上念 "UNIQUE constraint failed" 对用户没有任何用
+      assert.throws(
+        () => issueCiKey(db, 'second', MASTER_KEY, 'same-ci-key-value-01'),
+        (error: Error) => !/UNIQUE|constraint/i.test(error.message),
+      );
+    } finally {
+      db.close();
+    }
+  });
+
   it('库里存的是哈希与密文，不出现明文', () => {
     const db = freshDb();
     try {
@@ -175,17 +193,57 @@ describe('CI key', () => {
     }
   });
 
-  it('吊销后不再通过，也不能再改值', () => {
+  it('删除后不再通过，列表里也不留记录', () => {
     const db = freshDb();
     try {
       const issued = issueCiKey(db, 'k', MASTER_KEY);
-      revokeCiKey(db, issued.id);
+      deleteCiKey(db, issued.id);
       assert.equal(verifyCiKey(db, issued.value!), null);
-      assert.throws(() => revokeCiKey(db, issued.id), /已吊销/);
-      assert.throws(
-        () => updateCiKey(db, issued.id, { value: 'another-key-0001' }, MASTER_KEY),
-        /已吊销/,
-      );
+      assert.equal(listCiKeys(db, MASTER_KEY).length, 0, '删除即不留痕，不是软删除');
+      assert.throws(() => deleteCiKey(db, issued.id), /不存在/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('删除被构建记录引用的 key：key 消失，构建保留但上报来源置空', () => {
+    const db = freshDb();
+    try {
+      const issued = issueCiKey(db, 'k', MASTER_KEY);
+      db.prepare(
+        `INSERT INTO games (id, slug, display_name, created_at) VALUES ('g1','demo','Demo',?)`,
+      ).run(new Date().toISOString());
+      db.prepare(
+        `INSERT INTO package_types (id, display_name, created_at) VALUES ('h5','H5',?)`,
+      ).run(new Date().toISOString());
+      db.prepare(
+        `INSERT INTO builds
+           (id, game_id, package_type_id, build_id, artifact_url, size_bytes, sha256, reported_at, ci_key_id)
+         VALUES ('b1','g1','h5','r1','https://x/a.zip',1,'h',?,?)`,
+      ).run(new Date().toISOString(), issued.id);
+
+      deleteCiKey(db, issued.id);
+
+      const build = db
+        .prepare<[], { id: string; ci_key_id: string | null }>(
+          'SELECT id, ci_key_id FROM builds',
+        )
+        .get();
+      assert.equal(build?.id, 'b1', '构建是 CI 上报的事实，不该跟着 key 一起消失');
+      assert.equal(build?.ci_key_id, null);
+      assert.equal(listCiKeys(db, MASTER_KEY).length, 0);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('删除不存在的 key 时不留下半截改动', () => {
+    const db = freshDb();
+    try {
+      const kept = issueCiKey(db, 'kept', MASTER_KEY);
+      assert.throws(() => deleteCiKey(db, 'no-such-id'), /不存在/);
+      assert.equal(listCiKeys(db, MASTER_KEY).length, 1);
+      assert.equal(verifyCiKey(db, kept.value!), kept.id, '失败的删除不该影响其他 key');
     } finally {
       db.close();
     }

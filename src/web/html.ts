@@ -197,6 +197,16 @@ const PAGE_SCRIPT = `
       ' ' + pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds());
   }
 
+  // 破坏性操作的二次确认。文案放在 data-confirm 属性里而不是内联 onsubmit：
+  // 属性值走的是 HTML 转义，里面带引号或撇号的名字不会把脚本拼断。
+  document.addEventListener('submit', (event) => {
+    const form = event.target instanceof Element ? event.target.closest('[data-confirm]') : null;
+    if (!form) return;
+    if (!window.confirm(form.getAttribute('data-confirm') || '确定执行？')) {
+      event.preventDefault();
+    }
+  });
+
   document.addEventListener('click', (event) => {
     const target = event.target instanceof Element ? event.target.closest('[data-copy]') : null;
     if (!target) return;

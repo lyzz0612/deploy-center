@@ -13,9 +13,9 @@ import { isAdmin, readCookie, SESSION_COOKIE } from '../auth/guard.js';
 import type { SessionStore } from '../auth/session.js';
 import {
   checkPassword,
+  deleteCiKey,
   isPasswordSet,
   issueCiKey,
-  revokeCiKey,
   setPassword,
   updateCiKey,
 } from '../auth/store.js';
@@ -122,8 +122,8 @@ function noticeFromQuery(url: URL): SettingsFlash {
       return { message: 'CI key 已保存。值会一直保存在本机，随时可以复制。' };
     case 'key-updated':
       return { message: 'CI key 已更新。旧值如果用过，记得同步换掉 CI 那边的 secret。' };
-    case 'key-revoked':
-      return { message: 'CI key 已吊销，之后的上报会被拒绝。' };
+    case 'key-deleted':
+      return { message: 'CI key 已删除，之后用它上报会被拒绝。' };
     case 'install-queued':
       return {
         message: `安装任务已投递${cli === null ? '' : `（${cli}）`}。npm 安装通常要一两分钟，稍后刷新查看结果。`,
@@ -539,10 +539,10 @@ export async function handleUi(
       return true;
     }
 
-    const ciKeyRevokeMatch = /^\/settings\/ci-keys\/([0-9a-f-]+)\/revoke$/.exec(path);
-    if (ciKeyRevokeMatch !== null && method === 'POST') {
-      revokeCiKey(deps.db, ciKeyRevokeMatch[1]!);
-      redirect(res, '/settings/ci-keys?notice=key-revoked');
+    const ciKeyDeleteMatch = /^\/settings\/ci-keys\/([0-9a-f-]+)\/delete$/.exec(path);
+    if (ciKeyDeleteMatch !== null && method === 'POST') {
+      deleteCiKey(deps.db, ciKeyDeleteMatch[1]!);
+      redirect(res, '/settings/ci-keys?notice=key-deleted');
       return true;
     }
 

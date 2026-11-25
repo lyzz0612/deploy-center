@@ -78,7 +78,6 @@ export interface CiKeySummary {
   readonly value: string | null;
   readonly createdAt: string;
   readonly lastUsedAt: string | null;
-  readonly revokedAt: string | null;
 }
 
 interface CiKeyRow {
@@ -89,7 +88,6 @@ interface CiKeyRow {
   readonly token_encrypted: Buffer | null;
   readonly created_at: string;
   readonly last_used_at: string | null;
-  readonly revoked_at: string | null;
 }
 
 /** 自定义 key 的下限。低于这个长度连「自用」都谈不上。 */
@@ -125,7 +123,6 @@ function toCiKeySummary(row: CiKeyRow, masterKey: string): CiKeySummary {
     value,
     createdAt: row.created_at,
     lastUsedAt: row.last_used_at,
-    revokedAt: row.revoked_at,
   };
 }
 
@@ -163,10 +160,20 @@ export function issueCiKey(
   const prefix = generated === null ? key.slice(0, 8) : generated.prefix;
 
   const id = randomUUID();
-  db.prepare(
-    `INSERT INTO ci_keys (id, name, prefix, token_hash, token_encrypted, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run(id, trimmedName, prefix, hashToken(key), encryptCiKeyValue(key, masterKey), now());
+  try {
+    db.prepare(
+      `INSERT INTO ci_keys (id, name, prefix, token_hash, token_encrypted, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(id, trimmedName, prefix, hashToken(key), encryptCiKeyValue(key, masterKey), now());
+  } catch (error) {
+    // 唯一约束的原始报错是 "UNIQUE constraint failed: ci_keys.token_hash"，
+    // 对着界面念 SQL 没有意义：用户要知道的是「这个值已经在用了」。
+    // updateCiKey 早就这么翻译了，新建这条路径漏了。
+    if (error instanceof Error && /UNIQUE/.test(error.message)) {
+      throw new Error('这个 CI key 值已被另一条记录使用，请换一个');
+    }
+    throw error;
+  }
   return getCiKey(db, id, masterKey);
 }
 
@@ -184,10 +191,6 @@ export function updateCiKey(
   masterKey: string,
 ): CiKeySummary {
   const current = readCiKeyRow(db, id);
-  if (current.revoked_at !== null) {
-    throw new Error('CI key 已吊销，不能修改；请新建一条');
-  }
-
   const name = changes.name === undefined ? current.name : changes.name.trim();
   if (name.length === 0) {
     throw new Error('CI key 名称不能为空');
@@ -225,11 +228,34 @@ export function listCiKeys(db: Db, masterKey: string): CiKeySummary[] {
   return rows.map((row) => toCiKeySummary(row, masterKey));
 }
 
-export function revokeCiKey(db: Db, id: string): void {
-  const result = db.prepare('UPDATE ci_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').run(now(), id);
-  if (result.changes === 0) {
-    throw new Error(`CI key ${id} 不存在或已吊销`);
-  }
+/**
+ * 删除一个 CI key。删掉即失效，列表里不留痕。
+ *
+ * 不做软删除：一条既不能用也不能改的记录留在设置页里只是噪音，而「它曾经
+ * 存在过」对自用后台没有价值。要换值就直接改值（旧值当场失效）。
+ *
+ * 构建记录**不删**：那是 CI 上报的事实，不该因为换了把钥匙就消失。所以先
+ * 把引用置空再删 key，否则外键会拦住整个操作。代价是那些历史构建不再知道
+ * 当初是谁上报的，而这正是删除的含义。
+ */
+export function deleteCiKey(db: Db, id: string): void {
+  db.transaction(() => {
+    const cleared = db
+      .prepare('UPDATE builds SET ci_key_id = NULL WHERE ci_key_id = ?')
+      .run(id);
+
+    const result = db.prepare('DELETE FROM ci_keys WHERE id = ?').run(id);
+    if (result.changes === 0) {
+      // 抛出会让整个事务回滚，连带撤销上面的置空
+      throw new Error(`CI key ${id} 不存在`);
+    }
+    if (cleared.changes > 0) {
+      // 这不是错误，但属于「删除产生了附带影响」，值得留在日志里
+      console.info(
+        `[ci-key] 删除 ${id} 时清空了 ${cleared.changes} 条构建记录的上报来源`,
+      );
+    }
+  })();
 }
 
 /**
@@ -243,9 +269,7 @@ export function verifyCiKey(db: Db, token: string): string | null {
     readonly id: string;
     readonly token_hash: string;
   }
-  const rows = db
-    .prepare<[], Row>('SELECT id, token_hash FROM ci_keys WHERE revoked_at IS NULL')
-    .all();
+  const rows = db.prepare<[], Row>('SELECT id, token_hash FROM ci_keys').all();
 
   for (const row of rows) {
     if (tokenMatches(token, row.token_hash)) {
