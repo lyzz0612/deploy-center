@@ -67,6 +67,7 @@
 
 - **运行时**：Node.js 22 + TypeScript
 - **数据**：SQLite（WAL）
+- **对象存储**：`@aws-sdk/client-s3`（H5 发到 Cloudflare R2 或任何 S3 兼容存储）
 - **界面**：服务端渲染 HTML（不是 SPA，理由见 design.md D9）
 - **部署**：Docker Compose（单个服务 + 数据卷 + CLI 卷），镜像由 GitHub Actions 构建并发布到 GHCR（`ghcr.io/lyzz0612/minigames`）
 - **变更管理**：[OpenSpec](https://github.com/Fission-AI/OpenSpec)
@@ -84,9 +85,9 @@
 | 架构、领域模型、插件契约 | 已定稿并实现 |
 | 能力规格（6 项） | 通过 `openspec validate --strict` |
 | 实施进度 | 43/46 任务 |
-| 测试 | 433 个通过 |
+| 测试 | 475 个通过 |
 | CI 上报 → 构建列表 | 已实测（含幂等、按 commit 聚合） |
-| H5 发布 → 外部 URL 验证 → 回滚 | 已实测（真实 HTTP 访问） |
+| H5（R2）上传 → 切指针 → 外部 URL 验证 → 回滚 | 已实测，对的是**进程内假 S3**（真 SDK、真 HTTP、真签名）；真实 R2 未跑过 |
 | 失败重试、进程中断恢复 | 已实测 |
 | 平台 CLI 安装与三层探测 | 已实测（两个真实 CLI） |
 | 微信真实上传 | **未验证**，插件集成用 stub CLI 验过 |
@@ -137,7 +138,7 @@ docker compose up -d
 - [x] 任务执行器（多阶段、重试、超时、中断恢复）
 - [x] CLI 安装与三层可用性探测
 - [x] 微信插件（真实上传待验证）
-- [x] H5 目标插件（发布与回滚已实测）
+- [x] H5 对象存储插件 `h5-r2`（Cloudflare R2 / S3 兼容；真实 R2 待验证）
 - [x] 中控台界面
 - [x] 镜像构建流水线：推 tag 或手动触发 → 冒烟 → GHCR
 - [ ] Docker 主机上的端到端部署验证

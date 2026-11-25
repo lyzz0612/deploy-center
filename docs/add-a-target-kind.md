@@ -14,8 +14,8 @@
 import type { TargetKindManifest } from '../../registry/index.js';
 
 export const myManifest: TargetKindManifest = {
-  id: 'h5-r2',
-  displayName: 'H5 对象存储（R2）',
+  id: 'h5-oss',
+  displayName: 'H5 对象存储（阿里云 OSS）',
   description: '把产物写进 S3 兼容存储，通过覆盖指针切流。',
 
   // 能吃哪些包类型。这是「错配不可能出现」的唯一机制：
@@ -59,7 +59,7 @@ export const myManifest: TargetKindManifest = {
 
 只有真正决定**发到哪**的字段该标 `identity: true`。
 
-反例：如果把"备注"也算进去，改一下备注就能绕过去重，造出两个指向同一位置的实例——它们会互相覆盖。正例是 `h5-dir` 的 `baseUrl` 不参与去重：它是"怎么访问"，不是"发到哪"。
+反例：如果把"备注"也算进去，改一下备注就能绕过去重，造出两个指向同一位置的实例——它们会互相覆盖。正例是 `h5-r2` 的 `baseUrl` 不参与去重：它是"怎么访问"，不是"发到哪"。
 
 ### 2. 写环境检查
 
@@ -156,9 +156,9 @@ export const myPlugin: TargetKind = {
 然后在 `src/plugins/index.ts` 加一行：
 
 ```ts
-import { myPlugin } from './h5-r2/index.js';
+import { myPlugin } from './h5-oss/index.js';
 
-const PLUGINS: readonly TargetKind[] = [wechatPlugin, h5DirPlugin, myPlugin];
+const PLUGINS: readonly TargetKind[] = [wechatPlugin, h5R2Plugin, myPlugin];
 ```
 
 **到这里就结束了。** 核心会自动：把它列进「添加发布目标」的类型选择和自检页、按 `accepts` 过滤发布候选、渲染两套表单、按 `stages` 编排执行、按 `capabilities` 决定显示哪个回滚入口。
@@ -196,22 +196,31 @@ const PLUGINS: readonly TargetKind[] = [wechatPlugin, h5DirPlugin, myPlugin];
 
 错误信息会一次列全部问题，不是只报第一个。
 
-## 以 h5-dir 为模板改 R2 型
+## 以 h5-r2 为模板加别的 H5 目标
 
-[h5-dir](../src/plugins/h5-dir/) 是一个完整的 H5 目标实现。把它改成对象存储型，要动的只有"怎么把字节放上去"：
+[h5-r2](../src/plugins/h5-r2/) 是一个完整的 H5 目标实现（Cloudflare R2 / 任何 S3 兼容存储）。再加一种 H5 目标时，**要动的只有"怎么把字节放上去"**：
 
-| 部分 | h5-dir | h5-r2 |
-| --- | --- | --- |
-| manifest | `requiresCredential: null` | `requiresCredential: 's3Keys'` |
-| targetFields | `rootDir` + `prefix` | `bucket` + `prefix`（+ endpoint 在凭据里） |
-| upload 阶段 | `cp -r` 到目录 | `rclone copy` 或 S3 SDK 批量上传 |
-| activate 阶段 | `writeFile(config.json)` | 上传单个对象，**单独设 `Cache-Control: no-store`** |
-| verify | `fetch(baseUrl + config.json)` | 同左，不变 |
-| 回滚 | 覆盖 config.json | 同左，不变 |
+| 部分 | h5-r2 | h5-nginx（写本地目录） | h5-webdav |
+| --- | --- | --- | --- |
+| `requiresCredential` | `'s3Keys'` | `null`（写本机目录不需要） | `'usernamePassword'` |
+| `targetFields` | `bucket` + `prefix` | `rootDir` + `prefix` | `baseDav` + `prefix` |
+| upload 阶段 | S3 `PutObject` 并发上传 | `cp -r` 到目录 | `PUT` 逐个文件 |
+| activate 阶段 | 上传单个指针对象 | `writeFile(config.json)` | `PUT` 指针 |
+| verify | `fetch(baseUrl + config.json)` | 同左，不变 | 同左，不变 |
+| 回滚 | 覆盖指针 | 同左，不变 | 同左，不变 |
 
-**指针机制、版本目录布局、回滚语义三者完全一致**，可以直接复用 [pointer.ts](../src/plugins/h5-dir/pointer.ts)。
+**指针机制、版本目录布局、回滚语义三者完全一致**，可以直接复用 [pointer.ts](../src/plugins/h5-r2/pointer.ts)。
 
-一处对象存储特有的坑：版本目录里的资源要 `immutable, max-age=31536000`，而指针要 `no-store`，两者缓存策略相反。`rclone` 的 `--header-upload` 作用于整次 copy，所以**必须拆成两次调用**，不能为了省事合并。
+两处 H5 目标共有的坑：
+
+- **版本资源与指针的缓存策略相反**：版本目录里的文件永不改变，要 `immutable, max-age=31536000`；指针必须每次回源，要 `no-store`。合成一次设置就一定有一边是错的。h5-r2 把这两个常量放在 [client.ts](../src/plugins/h5-r2/client.ts) 顶部，并分成 `uploadTree` 与 `putPointer` 两个函数，就是为了不让它们被合并。
+- **清理旧版本时，当前版本与 `prev` 永不能删**。删掉 `prev` 等于让回滚失去目标，而那正是用户最需要它的时候。
+
+### 对象存储特有的三件事
+
+1. **没有目录**。"版本目录"是从键前缀推出来的，所以清理旧版本要先 `ListObjectsV2` 再按前缀分组，不能指望一个 `rmdir`。
+2. **翻页要看 `IsTruncated`**，不能只看 `NextContinuationToken`——后者在最后一页是 `undefined`，只靠它判断会在恰好整页时多转一圈。
+3. **`DeleteObjects` 是"部分成功"语义**：HTTP 200 的响应里也可能带着一串 `Errors`。不看它就会把清理失败当成功。
 
 ## 不要做的事
 

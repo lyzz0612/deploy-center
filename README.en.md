@@ -45,9 +45,9 @@ This repo is a self-hosted publish console for that problem: **CI only builds an
 
 ## Status
 
-The core path works and is verified against real HTTP: 433 tests pass, H5 publish and rollback were checked through an actual external URL, and both platform CLIs install successfully.
+The core path works and is verified against real HTTP: 475 tests pass, H5 publish and rollback were checked through an actual external URL, and both platform CLIs install successfully.
 
-**Not yet verified**: deployment on a real Docker host, a real WeChat upload (that needs a mini-game account and a code upload key), and the image workflow itself — it is configured (tags `v*` or manual dispatch → smoke test → GHCR) but has not run yet. See [README.md](README.md) for details.
+**Not yet verified**: deployment on a real Docker host, a real WeChat upload (that needs a mini-game account and a code upload key), a real Cloudflare R2 bucket (the H5 target is tested against an in-process fake S3 that exercises the real SDK, signing and paging), and the image workflow itself — it is configured (tags `v*` or manual dispatch → smoke test → GHCR) but has not run yet. See [README.md](README.md) for details.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -61,7 +61,7 @@ The core path works and is verified against real HTTP: 433 tests pass, H5 publis
 - [x] CI ingestion API and build views
 - [x] Job runner (stages, retry, timeout, crash recovery)
 - [x] CLI installation and three-layer probing
-- [x] WeChat plugin (real upload pending) and an H5 target plugin
+- [x] WeChat plugin (real upload pending) and the `h5-r2` object-storage target (Cloudflare R2 / S3-compatible)
 - [x] Console UI
 - [x] Image pipeline: tag or manual dispatch → smoke test → GHCR
 - [ ] End-to-end deployment on a Docker host

@@ -68,9 +68,24 @@ docker compose up -d --build
 按这个顺序，每一步都依赖前一步：
 
 1. **CI key**（设置 → CI key）— 值加密保存在本机，随时可复制；填进 CI 的 secret
-2. **凭据**（设置 → 凭据）— 微信需要 `file` 型（代码上传密钥的文件内容）
+2. **凭据**（设置 → 凭据）— 微信需要 `file` 型（代码上传密钥的文件内容）；H5 发 R2 需要 `s3Keys` 型
 3. **游戏**（游戏）— slug 创建后不可改，它会出现在 CI 上报里
 4. **发布目标**（游戏详情 → 添加发布目标）— 选类型、选凭据、填位置字段
+
+### 4b. H5 发 R2 要准备什么
+
+后台**不承担 H5 流量入口**：它只把产物写进桶，对外访问由 Cloudflare 提供。所以要先在 Cloudflare 侧准备好三样东西：
+
+| 准备 | 在哪拿 | 填到哪 |
+| --- | --- | --- |
+| 桶 | R2 → Create bucket（**后台不会自动建桶**） | 目标实例的 `bucket` |
+| API token（含该桶的读写） | R2 → Manage API tokens | 凭据的 `accessKeyId` / `secretAccessKey` |
+| S3 endpoint | R2 概览页，形如 `https://<accountid>.r2.cloudflarestorage.com` | 凭据的 `endpoint` |
+| 公开域名 | 桶 → Settings → Custom domain（或 Workers 路由） | 目标实例的 `baseUrl` |
+
+`endpoint` 留空会让 SDK 去连 AWS，所以插件直接拒绝而不是让它跑到几层之外才失败。`baseUrl` 是发布后回读指针用的——**它验证的是"外部真的能取到"**，不只是"写进去了"。
+
+桶、token、endpoint 配好后，目标详情页的实例级检查（凭据层 + 可达层）能在发布之前就把问题说清楚：桶名写错、token 没有这个桶的权限、endpoint 指向另一个账号，三者给的是不同的结论。
 
 ### 5. 接上 CI
 
@@ -232,7 +247,7 @@ docker compose up -d --build
 | 启动、建表、包类型登记 | 已实测（本机进程） |
 | CLI 安装到持久卷、重启后仍可用 | 已实测，两个真实平台 CLI 都装成功并探测可用 |
 | CI 上报 → 构建列表 | 已实测，含幂等与 commit 聚合 |
-| H5 发布 → 外部 URL 取到新版本 → 回滚 | 已实测，走真实 HTTP 访问 |
+| H5（R2）发布 → 外部 URL 取到新版本 → 回滚 | 已实测，但对的是**进程内的假 S3 服务**（真 SDK、真 HTTP、真签名）；**未对真实 Cloudflare R2 跑过** |
 | 重试失败阶段 | 已实测，第一阶段未重跑 |
 | 进程中断恢复 | 已实测（见上） |
 | **`docker compose up` 全流程** | **未实测**，本机没有 Docker 与 WSL |
