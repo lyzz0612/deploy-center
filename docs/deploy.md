@@ -48,13 +48,14 @@ docker compose logs -f app
 docker compose up -d --build
 ```
 
-首次启动会做三件事：
+用 1Panel 部署（Compose 编排 + OpenResty 反向代理 + HTTPS）的完整步骤见 [deploy-1panel.md](deploy-1panel.md)。
+
+首次启动会做两件事：
 
 1. 建表（`CREATE TABLE IF NOT EXISTS`，幂等）
 2. 登记插件声明的包类型（当前是 `h5` 与 `wechat`）
-3. 投递平台 CLI 的安装任务（**异步**，不阻塞启动）
 
-CLI 安装是分钟级的。同步装会让容器迟迟不就绪、健康检查判它失败然后反复重启，所以它走任务队列。到设置页看进度。
+平台 CLI **不会**自动安装：两个加起来约 280 MB，只发 H5 的部署根本用不到。到设置页按需安装，装、探测、升级都在后台可见。安装本身走任务队列（分钟级），同步装会让容器迟迟不就绪、健康检查判它失败然后反复重启。
 
 ### 3. 设置管理员口令
 
@@ -147,12 +148,14 @@ server {
 
 要备份的只有数据卷里的 SQLite 文件。CLI 卷不用备份，重装即可。
 
+镜像里没有 `sqlite3` 命令行，用应用自带的 `better-sqlite3` 做在线备份（走 SQLite 的 backup API，WAL 下也是安全快照）：
+
 ```bash
-docker compose exec app sh -c "cd /data && sqlite3 console.db '.backup /data/backup.db'"
+docker compose exec app node -e "const D=require('better-sqlite3');const db=new D('/data/console.db',{readonly:true});db.backup('/data/backup.db').then(()=>{db.close();console.log('backup ok')}).catch(e=>{console.error(e.message);process.exit(1)})"
 docker cp "$(docker compose ps -q app)":/data/backup.db ./console-$(date +%F).db
 ```
 
-**不要直接复制 `console.db`**：WAL 模式下还有 `-wal` 与 `-shm` 两个旁文件，单独拷主文件可能拿到一个不一致的快照。`.backup` 命令会处理这件事。
+**不要直接复制 `console.db`**：WAL 模式下还有 `-wal` 与 `-shm` 两个旁文件，单独拷主文件可能拿到一个不一致的快照。backup API 会处理这件事。
 
 备份里包含加密后的凭据。**主密钥不在备份里**，所以恢复时必须有同一个 `MASTER_KEY`，否则凭据全部解不开。
 

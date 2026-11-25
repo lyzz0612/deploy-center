@@ -157,6 +157,7 @@ docker compose up -d
 | [tasks.md](openspec/changes/add-publish-console/tasks.md) | 12 组实施任务，每项带验证方式 |
 | [specs/](openspec/changes/add-publish-console/specs/publish-console/) | 6 项能力的行为契约：游戏与包类型、凭据、构建上报、发布目标、发布执行、CLI 管理 |
 | [deploy.md](docs/deploy.md) | 部署步骤、备份、升级，以及故障演练的实测结果 |
+| [deploy-1panel.md](docs/deploy-1panel.md) | 在 1Panel 上用 Compose 部署，配 OpenResty 反向代理与 HTTPS |
 | [ci-report.md](docs/ci-report.md) | CI 接入：上报接口的字段、幂等规则与 GitHub Actions 示例 |
 | [add-a-target-kind.md](docs/add-a-target-kind.md) | 新增一个发布目标类型的五步，以及自检会替你挡住什么 |
 | [cli-management.md](docs/cli-management.md) | 平台 CLI 的安装、三层探测与跨平台实现细节 |
