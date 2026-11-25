@@ -47,4 +47,7 @@ ENV NODE_ENV=production \
 # 不以 root 运行：私钥与 cookie 会物化到磁盘
 USER node
 
+# 仅作声明，实际端口由 PORT 环境变量决定（缺省 3000）
+EXPOSE 3000
+
 CMD ["node", "dist/main.js"]
