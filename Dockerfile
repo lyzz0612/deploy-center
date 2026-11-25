@@ -5,6 +5,9 @@
 FROM node:22-bookworm-slim AS build
 
 WORKDIR /app
+# corepack 首次用到 packageManager 指定的 pnpm 时会交互式询问是否下载；
+# 构建容器里没有 TTY，不关掉这个提示会直接失败。
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json ./
@@ -22,6 +25,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable
 
 # --prod 之后仍要跑 better-sqlite3 的安装脚本（预编译二进制下载或本地编译），

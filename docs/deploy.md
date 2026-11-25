@@ -32,11 +32,20 @@ WEB_PORT=3000
 
 ### 2. 启动
 
+默认用 CI 构建好的镜像（见「镜像从哪来」一节）：
+
 ```bash
 git clone https://github.com/lyzz0612/minigames.git
 cd minigames
+docker compose pull
 docker compose up -d
 docker compose logs -f app
+```
+
+`docker compose pull` 失败说明镜像还没发布过。这时可以从源码构建，行为相同、只是慢：
+
+```bash
+docker compose up -d --build
 ```
 
 首次启动会做三件事：
@@ -78,6 +87,34 @@ docker compose exec app node -e "fetch('https://api.ipify.org').then(r=>r.text()
 
 不加白名单时，发布会失败并提示"私钥有效，但本机出口 IP 不在白名单内"，带上具体 errcode。这个检查也在游戏详情页的实例级检查里，不用等到发布才发现。
 
+## 镜像从哪来（CI）
+
+镜像由 [.github/workflows/docker-publish.yml](../.github/workflows/docker-publish.yml) 构建并推到 GHCR，部署机不需要本地 Docker 构建。
+
+**触发**：
+
+| 方式 | 产生的镜像标签 |
+| --- | --- |
+| 推 `v*` 标签（如 `v1.2.3`） | `1.2.3`、`1.2`、`latest`。预发布标签（如 `v1.2.3-rc.1`）只发它自己，不动 `latest` |
+| Actions 页面手动 Run workflow | 分支名、`sha-<短哈希>`，可再填一个额外标签；取消勾选 `push_image` 则只构建冒烟、不推送 |
+
+**流程**：先构建到 runner 本地 → 真起容器查 `/healthz` 与首次设置页 → 通过了才登录 GHCR 推送。坏镜像不会进仓库。
+
+**手动触发的前提**：GitHub 只在默认分支上列出 `workflow_dispatch` 工作流。本仓库默认分支目前是 `framework`，所以要先让这份工作流进入默认分支（合并分支或切换默认分支），Actions 页面才会出现 Run workflow 按钮；**推 `v*` 标签不受影响**，只要打标签的那个提交里带着这个工作流。
+
+镜像位于 `ghcr.io/lyzz0612/minigames`。**GHCR 的包默认是私有的**，部署机首次拉取要登录（token 带 `read:packages` 即可）；想匿名拉取就到包的设置里把可见性改成 public。
+
+```bash
+echo "$GHCR_TOKEN" | docker login ghcr.io -u <GitHub 用户名> --password-stdin
+docker compose pull
+```
+
+`compose.yaml` 里的镜像标签可用 `IMAGE_TAG` 覆盖，钉版本：
+
+```bash
+IMAGE_TAG=1.2.3 docker compose pull
+```
+
 ## 反向代理
 
 容器只听 HTTP。生产环境应该在前面放一层 TLS 终止：
@@ -114,6 +151,15 @@ docker cp "$(docker compose ps -q app)":/data/backup.db ./console-$(date +%F).db
 备份里包含加密后的凭据。**主密钥不在备份里**，所以恢复时必须有同一个 `MASTER_KEY`，否则凭据全部解不开。
 
 ## 升级
+
+用 CI 镜像时：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+从源码构建时：
 
 ```bash
 git pull
@@ -181,6 +227,7 @@ docker compose up -d --build
 | 重试失败阶段 | 已实测，第一阶段未重跑 |
 | 进程中断恢复 | 已实测（见上） |
 | **`docker compose up` 全流程** | **未实测**，本机没有 Docker 与 WSL |
+| **镜像构建与启动冒烟（CI）** | 工作流已加入，**尚未在 Actions 上跑过**；冒烟断言已用本地进程等价验证（`/healthz` 返回 `{"status":"ok"}`、首页是首次设置页） |
 | **微信真实上传** | **未实测**，需要小游戏账号与代码上传密钥。插件与核心的集成用 stub CLI 验过 |
 | 反向代理与 TLS | 未实测 |
 | 备份与恢复 | 未实测 |

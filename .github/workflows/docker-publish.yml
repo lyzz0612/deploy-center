@@ -1,0 +1,116 @@
+name: docker-publish
+
+# 构建中控台镜像并推送到 ghcr.io。
+#
+# 触发方式：
+#   - 推 v* 标签：发布 1.2.3 / 1.2 / latest（预发布标签如 v1.2.3-rc.1 不动 latest）
+#   - 手动触发：发布 <分支名> 与 sha-<短哈希>，可额外指定一个标签；
+#     取消勾选 push_image 则只构建并冒烟、不推送（第一次验证用这个）
+#
+# 先构建到 runner 本地并真起容器冒烟，通过了才登录 ghcr 推送：坏镜像不进仓库。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      extra_tag:
+        description: '额外的镜像标签（可选，例如 test）'
+        required: false
+        default: ''
+        type: string
+      push_image:
+        description: '推送到 ghcr（取消勾选只构建并冒烟）'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # ghcr 的镜像名必须全小写；本仓库名已是小写
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 镜像元数据
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          # 关掉 flavor 自动生成的 latest：它会和下面显式那条重复。
+          # latest 只由显式规则产生，预发布标签不会覆盖它。
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=${{ inputs.extra_tag }},enable=${{ inputs.extra_tag != '' }}
+
+      # 先只构建到本地做冒烟测试，通过了才推送
+      - name: 构建（本地）
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: mgc-smoke:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 冒烟测试
+        run: |
+          set -euo pipefail
+          docker run -d --rm --name mgc -p 3000:3000 \
+            -e MASTER_KEY=ci-smoke-master-key-0123456789 mgc-smoke:test
+
+          # 建表、加载 better-sqlite3 需要一点时间，给 30 秒
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/healthz -o /dev/null; then break; fi
+            sleep 1
+          done
+
+          health=$(curl -fsS http://127.0.0.1:3000/healthz)
+          echo "healthz: $health"
+          grep -q '"status":"ok"' <<< "$health"
+
+          # 未设口令时首页必须是首次设置页：证明 UI 与数据库都活着
+          curl -fsS http://127.0.0.1:3000/ -o /tmp/index.html
+          grep -q '首次设置' /tmp/index.html
+
+          docker logs mgc
+
+      - name: 冒烟失败时输出日志
+        if: failure()
+        run: docker logs mgc || true
+
+      - name: 登录 ghcr
+        if: github.event_name == 'push' || inputs.push_image
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送
+        if: github.event_name == 'push' || inputs.push_image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha

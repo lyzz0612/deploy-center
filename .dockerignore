@@ -5,6 +5,7 @@ dist-test/
 
 .git/
 .gitignore
+.github/
 
 data/
 *.db

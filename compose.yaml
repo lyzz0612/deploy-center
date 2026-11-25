@@ -10,7 +10,10 @@ services:
   app:
     build:
       context: .
-    image: minigames-console:local
+    # 镜像由 CI（.github/workflows/docker-publish.yml）构建并推到 ghcr。
+    # 部署机 `docker compose pull` 即可拿到；本地改过代码时用
+    # `docker compose up -d --build` 覆盖它。
+    image: ghcr.io/lyzz0612/minigames:${IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
       NODE_ENV: production

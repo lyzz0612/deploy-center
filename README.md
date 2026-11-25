@@ -68,7 +68,7 @@
 - **运行时**：Node.js 22 + TypeScript
 - **数据**：SQLite（WAL）
 - **界面**：服务端渲染 HTML（不是 SPA，理由见 design.md D9）
-- **部署**：Docker Compose（单个服务 + 数据卷 + CLI 卷）
+- **部署**：Docker Compose（单个服务 + 数据卷 + CLI 卷），镜像由 GitHub Actions 构建并发布到 GHCR（`ghcr.io/lyzz0612/minigames`）
 - **变更管理**：[OpenSpec](https://github.com/Fission-AI/OpenSpec)
 
 <p align="right">(<a href="#readme-top">返回顶部</a>)</p>
@@ -90,6 +90,7 @@
 | 失败重试、进程中断恢复 | 已实测 |
 | 平台 CLI 安装与三层探测 | 已实测（两个真实 CLI） |
 | 微信真实上传 | **未验证**，插件集成用 stub CLI 验过 |
+| 镜像构建与发布（CI → GHCR） | 工作流已配置（推 `v*` 标签 / 手动触发），**尚未首次运行** |
 | Docker 部署 | **未验证**，本机无 Docker |
 
 <p align="right">(<a href="#readme-top">返回顶部</a>)</p>
@@ -110,6 +111,7 @@
 ```bash
 git clone https://github.com/lyzz0612/minigames.git
 cd minigames
+docker compose pull   # 用 CI 构建好的镜像；没有镜像时改用 up -d --build 从源码构建
 docker compose up -d
 ```
 
@@ -137,6 +139,7 @@ docker compose up -d
 - [x] 微信插件（真实上传待验证）
 - [x] H5 目标插件（发布与回滚已实测）
 - [x] 中控台界面
+- [x] 镜像构建流水线：推 tag 或手动触发 → 冒烟 → GHCR
 - [ ] Docker 主机上的端到端部署验证
 
 完整任务与验证方式见 [tasks.md](openspec/changes/add-publish-console/tasks.md)。
