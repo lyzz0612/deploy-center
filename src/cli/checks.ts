@@ -115,9 +115,15 @@ export async function checkTarget(deps: CheckTargetDeps, targetId: string): Prom
     secret(field) {
       const value = secrets[field];
       if (value === undefined) {
-        throw new Error(`凭据里没有字段 ${field}`);
+        throw new Error(
+          `凭据里没有字段 ${field}。可用字段：${Object.keys(secrets).join(', ') || '（无）'}`,
+        );
       }
       return value;
+    },
+    // 与发布期的 ctx 保持一致：可选字段没填时返回空串，不抛错
+    secretOptional(field) {
+      return secrets[field] ?? '';
     },
     async secretFile() {
       // 检查阶段不物化凭据文件：那需要一个工作目录与清理时机，而检查

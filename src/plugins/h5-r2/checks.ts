@@ -31,6 +31,7 @@ const credentialCheck: Check<PublishContext> = {
   name: '密钥与 endpoint',
   level: 'credential',
   async run(ctx): Promise<CheckResult> {
+    // 必填字段：没有值时 secret() 会抛，这里逐个兜住，一次把缺的都列出来
     const missing: string[] = [];
     for (const field of ['accessKeyId', 'secretAccessKey'] as const) {
       try {
@@ -43,12 +44,10 @@ const credentialCheck: Check<PublishContext> = {
       return { ok: false, message: `凭据缺少必填字段：${missing.join('、')}` };
     }
 
-    let endpoint: string;
-    try {
-      endpoint = ctx.secret('endpoint').trim();
-    } catch {
-      endpoint = '';
-    }
+    // endpoint 在凭据里是可选字段，但 R2 必须有它，所以在这一层拦住。
+    // 用 secretOptional 读：用 secret() 会在没填时抛「凭据里没有字段」，
+    // 那条信息指不到「该去填 endpoint」。
+    const endpoint = ctx.secretOptional('endpoint').trim();
     if (endpoint === '') {
       return {
         ok: false,
@@ -61,6 +60,7 @@ const credentialCheck: Check<PublishContext> = {
       return { ok: false, message: `endpoint 必须以 http(s):// 开头，当前是 ${endpoint}` };
     }
 
+    // region 不检查：R2 忽略它，留空时按 'auto' 处理
     return { ok: true, message: '密钥与 endpoint 已配置' };
   },
 };
@@ -68,8 +68,12 @@ const credentialCheck: Check<PublishContext> = {
 /**
  * L3：桶能不能通。
  *
- * 用 HeadBucket 这个只读调用来探：密钥失效、权限不含该桶、endpoint 指错
- * 账号、容器不能出网这四类问题都会在这里暴露，且没有任何副作用。
+ * **直接发一次真请求，不做任何预校验。** 这一层的全部价值就在于「真的试
+ * 一下」：密钥失效、权限不含该桶、endpoint 指错账号、容器不能出网，这些
+ * 都只有发出去才知道。在这里重复检查字段只会让失败停在本地，报出来的是
+ * 「凭据里没有字段 region」这种与可达性无关的话——那正是 L2 的职责。
+ *
+ * 用 HeadBucket：只读、无副作用。
  */
 const reachabilityCheck: Check<PublishContext> = {
   id: 'r2-reachable',
@@ -77,17 +81,17 @@ const reachabilityCheck: Check<PublishContext> = {
   level: 'reachability',
   async run(ctx): Promise<CheckResult> {
     let bucket: string;
-    try {
-      bucket = readBucket(ctx);
-    } catch (error) {
-      return { ok: false, message: error instanceof Error ? error.message : String(error) };
-    }
-
     let client: ReturnType<typeof createClient>;
     try {
+      bucket = readBucket(ctx);
       client = createClient(ctx);
     } catch (error) {
-      return { ok: false, message: error instanceof Error ? error.message : String(error) };
+      // 连请求都发不出去（目标没填 bucket、凭据缺 endpoint）。这类问题
+      // L2 已经报过，这里如实说明「没能发出请求」，不要伪装成可达性结论。
+      return {
+        ok: false,
+        message: `没能发起请求：${error instanceof Error ? error.message : String(error)}`,
+      };
     }
 
     try {

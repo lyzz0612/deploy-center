@@ -85,11 +85,13 @@ async function makeCtx(options: {
     },
     params: options.params ?? {},
     cliHome: join(scratch, 'empty-cli'),
+    // 缺省**不给 region**：它在凭据里声明为可选，而凭据只存有值的字段，
+    // 所以真实形状就是「没这个键」。此前这里硬塞了 region: 'auto'，
+    // 于是整套测试都没覆盖到用户留空的情况，线上就炸在那里。
     secrets: options.secrets ?? {
       accessKeyId: 'test-key-id',
       secretAccessKey: 'test-secret',
       endpoint: s3.url,
-      region: 'auto',
     },
     log: () => {},
     progress: () => {},
@@ -242,11 +244,26 @@ describe('上传版本目录', () => {
 
   it('缺 endpoint 时直接报错，而不是去连 AWS', async () => {
     const dir = await makeArtifact();
+    for (const secrets of [
+      // 填了空串
+      { accessKeyId: 'k', secretAccessKey: 's', endpoint: '' },
+      // 根本没这个键（凭据不存空值，这才是用户留空后的真实形状）
+      { accessKeyId: 'k', secretAccessKey: 's' },
+    ]) {
+      const { ctx } = await makeCtx({ artifactDir: dir, secrets });
+      await assert.rejects(h5R2Execute('upload', ctx), /endpoint 为空/);
+    }
+  });
+
+  it('没填 region 也能正常发布（可选字段，缺省 auto）', async () => {
+    const dir = await makeArtifact();
     const { ctx } = await makeCtx({
       artifactDir: dir,
-      secrets: { accessKeyId: 'k', secretAccessKey: 's', endpoint: '', region: 'auto' },
+      secrets: { accessKeyId: 'k', secretAccessKey: 's', endpoint: s3.url },
     });
-    await assert.rejects(h5R2Execute('upload', ctx), /endpoint 为空/);
+    await h5R2Execute('upload', ctx);
+    await h5R2Execute('activate', ctx);
+    assert.equal(pointerOf().active, 'r1');
   });
 
   it('未知阶段报错', async () => {
@@ -564,5 +581,39 @@ describe('实例级检查', () => {
     const result = await check('r2-reachable').run(ctx);
     assert.equal(result.ok, false);
     assert.match(result.message, /不存在/);
+  });
+
+  it('没填 region 时两层检查都照常通过——它是可选字段', async () => {
+    // 回归：此前可达性检查会报「凭据里没有字段 region」，一个与「桶通不通」
+    // 毫无关系的结论，而 region 在凭据里本来就声明为可选。
+    const { ctx } = await makeCtx({
+      artifactDir: await makeArtifact(),
+      secrets: { accessKeyId: 'k', secretAccessKey: 's', endpoint: s3.url },
+    });
+
+    const credential = await check('r2-credential').run(ctx);
+    assert.equal(credential.ok, true, credential.message);
+
+    const reachable = await check('r2-reachable').run(ctx);
+    assert.equal(reachable.ok, true, reachable.message);
+    assert.doesNotMatch(reachable.message, /region/);
+  });
+
+  it('可达性检查是真的发请求，而不是本地预校验', async () => {
+    const before = s3.calls.head;
+    const { ctx } = await makeCtx({ artifactDir: await makeArtifact() });
+    await check('r2-reachable').run(ctx);
+    assert.ok(s3.calls.head > before, '必须真的对桶发出一次 HeadBucket');
+  });
+
+  it('连请求都发不出去时如实说明，不伪装成可达性结论', async () => {
+    // 缺 endpoint：客户端建不起来，这类问题 L2 已经报过
+    const { ctx } = await makeCtx({
+      artifactDir: await makeArtifact(),
+      secrets: { accessKeyId: 'k', secretAccessKey: 's' },
+    });
+    const result = await check('r2-reachable').run(ctx);
+    assert.equal(result.ok, false);
+    assert.match(result.message, /没能发起请求/);
   });
 });

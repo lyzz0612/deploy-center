@@ -78,7 +78,9 @@ function contentTypeFor(key: string): string {
  * 几层调用之外，看不出根因。
  */
 export function createClient(ctx: PublishContext): S3Client {
-  const endpoint = ctx.secret('endpoint').trim();
+  // endpoint 与 region 在凭据里声明为可选，所以必须用 secretOptional 读：
+  // 用 secret() 会在「用户没填」时抛「凭据里没有字段」，把可选变成必填。
+  const endpoint = ctx.secretOptional('endpoint').trim();
   if (endpoint === '') {
     throw new Error(
       '凭据里的 endpoint 为空。R2 必须填账号专属的 S3 endpoint，' +
@@ -89,7 +91,7 @@ export function createClient(ctx: PublishContext): S3Client {
   return new S3Client({
     endpoint,
     // R2 忽略 region，但 SDK 要求有值，用 S3 的兼容写法。
-    region: ctx.secret('region').trim() || 'auto',
+    region: ctx.secretOptional('region').trim() || 'auto',
     credentials: {
       accessKeyId: ctx.secret('accessKeyId'),
       secretAccessKey: ctx.secret('secretAccessKey'),

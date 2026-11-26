@@ -103,6 +103,10 @@ export const myTargetChecks: readonly Check<PublishContext>[] = [
 
 **`reachability` 这一层最值钱**：它是唯一能暴露"密钥有效但出口 IP 未加白名单"这类问题的地方，而那个问题装得再好也看不出来。所以失败信息要具体到可行动，不要只说"不可用"。微信插件的 [classifyPlatformError](../src/plugins/wechat/checks.ts) 是一个参照：它把 errcode 翻译成"到哪里改什么"。
 
+**`reachability` 里不要做字段预校验。** 这一层的全部价值就是"真的发一次请求试试"：权限、白名单、endpoint 指错账号、容器不能出网，这些只有发出去才知道。在它里面重复检查字段，只会让失败停在本地，并报出一句与可达性无关的话——h5-r2 曾因此在用户没填可选的 `region` 时报"凭据里没有字段 region"，而正确答案是"桶能通"。字段齐不齐是 `credential` 层的职责，两层不要互相代劳。
+
+唯一的例外是"连请求都发不出去"（目标缺 bucket、凭据缺 endpoint，客户端根本建不起来）。那时要如实说"没能发起请求：…"，而不是伪装成一个可达性结论。
+
 ### 3. 写执行体
 
 `src/plugins/<your-kind>/publish.ts`：
@@ -128,15 +132,18 @@ export async function myExecute(stageId: string, ctx: PublishContext): Promise<S
 | `target` | 目标实例的位置字段（明文，不含密钥） |
 | `params` | 本次发布填的参数 |
 | `cliHome` | CLI 安装根目录 |
-| `secret(field)` | 凭据明文。核心解密，你不接触主密钥 |
+| `secret(field)` | **必填**凭据字段的明文。字段没有值时抛错 |
+| `secretOptional(field)` | **可选**凭据字段，没填时返回空串 |
 | `secretFile(field)` | 把凭据物化成临时文件，返回路径。**核心负责删除** |
 | `log(line)` | 追加日志，会落进发布记录 |
 | `signal` | 取消信号。**必须传给你 spawn 的子进程** |
 
-两条规矩：
+四条规矩：
 
+- **读 `required: false` 的凭据字段必须用 `secretOptional()`。** 凭据只存有值的字段（空值等于「没设置」），所以一个可选字段在用户留空时**根本不在凭据里**，用 `secret()` 读它会抛「凭据里没有字段 X」——于是「可选」在实际行为上变成了必填。h5-r2 的 `region` 踩过这个坑：用户没填 region，可达性检查就报了一句与桶通不通毫无关系的错。
 - **不要自己写临时凭据文件。** 用 `secretFile()`。自己写就要自己 `finally` 删，而那个 finally 迟早会在某条异常路径上被漏掉，密钥就留在磁盘上了。
 - **不要用同步 API 解压或读大文件。** 整个系统是单进程，`unzipSync` 一个几百兆的包会真的堵住事件循环。
+- **测试里不要给可选字段硬塞值。** 上面那个 bug 测试全绿却跑不起来，就是因为 fixture 里写死了 `region: 'auto'`，于是「用户留空」这条路径从没被覆盖。凭据 fixture 应当只给必填字段。
 
 ### 4. 组装并注册
 

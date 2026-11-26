@@ -64,6 +64,12 @@ export async function createContext(deps: ContextDeps): Promise<ManagedContext> 
       return value;
     },
 
+    // 可选字段：凭据只存有值的字段，所以「没填」与「字段不存在」是同一件事，
+    // 两者都返回空串，由插件决定缺省值。
+    secretOptional(field: string): string {
+      return deps.secrets[field] ?? '';
+    },
+
     async secretFile(field: string): Promise<string> {
       const value = ctx.secret(field);
       await mkdir(secretsDir, { recursive: true });

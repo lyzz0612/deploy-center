@@ -216,6 +216,41 @@ describe('密钥物化与清理', () => {
     }
   });
 
+  it('可选字段没填时 secretOptional 回空串而不是抛错', async () => {
+    // 凭据只存有值的字段（空值等于没设置），所以一个 required: false 的
+    // 字段在用户没填时根本不在 secrets 里。此前插件用 secret() 读它，
+    // 于是「可选」在实际行为上变成了必填——R2 的 region 就是这么炸的。
+    const managed = await createContext({
+      artifactDir: scratch,
+      workdir: scratch,
+      build: {
+        buildId: 'test-build',
+        commitSha: null,
+        packageTypeId: 'echo-pkg',
+        sha256: 'a'.repeat(64),
+        sizeBytes: 1,
+      },
+      target: {},
+      params: {},
+      cliHome: '/opt/cli',
+      // 刻意只给必填字段，模拟「可选项留空」后的凭据形状
+      secrets: { accessKeyId: 'k', secretAccessKey: 's' },
+      log: () => {},
+      progress: () => {},
+      signal: new AbortController().signal,
+    });
+    try {
+      assert.equal(managed.ctx.secretOptional('region'), '');
+      assert.equal(managed.ctx.secretOptional('endpoint'), '');
+      // 有值时与 secret() 一致
+      assert.equal(managed.ctx.secretOptional('accessKeyId'), 'k');
+      // 必填字段仍然该抛，这条行为不变
+      assert.throws(() => managed.ctx.secret('region'), /凭据里没有字段 region/);
+    } finally {
+      await managed.cleanupSecrets();
+    }
+  });
+
   it('物化的凭据文件权限是 600', async () => {
     const dir = mkdtempSync(join(scratch, 'perm-'));
     const managed = await createContext({
