@@ -131,7 +131,7 @@ docker compose exec app node -e "fetch('https://api.ipify.org').then(r=>r.text()
 
 | 方式 | 产生的镜像标签 |
 | --- | --- |
-| **push 到 `deploy-center`** | **自动发版**：版本号末位 +1，发 `X.Y.Z`、`latest`，并回推 `chore(release)` 提交与 `vX.Y.Z` 标签 |
+| **push 到 `deploy-center`** | **自动发版**：版本号末位 +1，发 `X.Y.Z`、`X.Y`、`latest`、`sha-<短哈希>`，并回推 `chore(release)` 提交与 `vX.Y.Z` 标签 |
 | 推 `v*` 标签（如 `v1.2.3`） | `1.2.3`、`1.2`、`latest`。预发布标签（如 `v1.2.3-rc.1`）只发它自己，不动 `latest` |
 | Actions 页面手动 Run workflow | 分支名、`sha-<短哈希>`，可再填一个额外标签；取消勾选 `push_image` 则只构建冒烟、不推送 |
 
@@ -154,6 +154,8 @@ docker compose exec app node -e "fetch('https://api.ipify.org').then(r=>r.text()
 **为什么发版和构建在同一个工作流里**：用 `GITHUB_TOKEN` 回推的提交与标签**不会**触发工作流——这是 Actions 为防递归的既有行为（[官方文档](https://docs.github.com/en/actions/concepts/security/github_token)）。所以「CI 推标签、让另一个工作流去构建」这条链在自动场景下是断的，必须一次把活干完。好处是顺带不会无限递归：CI 自己推的那次 push 不会再触发一轮。
 
 **并发**：同一分支的发版串行执行（`concurrency` 不取消进行中的任务）。两次 push 挨得很近时，后一次会等前一次跑完再算版本号，否则两者会算出同一个号、后打的标签必然失败。
+
+**已实测**（2026-11-26，run [45825935024](https://github.com/lyzz0612/minigames/actions/runs/45825935024) 与 [45827449030](https://github.com/lyzz0612/minigames/actions/runs/45827449030)）：push 到 `deploy-center` → 算出 `0.1.3` / `0.1.4` → 冒烟过（容器里 `database created at schema version 6`）→ 推 GHCR → 回推提交与标签，且 CI 自己那次回推**没有**触发第二轮。
 
 **手动触发的前提**：GitHub 只在默认分支上列出 `workflow_dispatch` 工作流。本仓库默认分支目前是 `framework`，所以 Actions 页面要等这份工作流进入默认分支（合并分支或切换默认分支）后才会出现 Run workflow 按钮；**推 `v*` 标签不受影响**——按 GitHub 文档，`push`（含 tag）会执行被推提交里的工作流，"This includes workflows that are not merged into the default branch"。
 
