@@ -8,7 +8,7 @@
  * 该搬到 src/registry/ 里去。
  */
 import type { Db } from '../db/index.js';
-import { archive, deleteIfUnreferenced, findReferences, unarchive } from '../db/index.js';
+import { deleteIfUnreferenced, findReferences } from '../db/index.js';
 import { targetKindsAccepting } from '../registry/index.js';
 import { ConflictError, NotFoundError } from '../shared/errors.js';
 
@@ -23,14 +23,12 @@ interface PackageTypeRow {
   readonly id: string;
   readonly display_name: string;
   readonly created_at: string;
-  readonly archived_at: string | null;
 }
 
 export interface PackageType {
   readonly id: string;
   readonly displayName: string;
   readonly createdAt: string;
-  readonly archivedAt: string | null;
   /**
    * 声明接受该包类型的目标类型 id。
    *
@@ -47,7 +45,6 @@ function toPackageType(db: Db, row: PackageTypeRow): PackageType {
     id: row.id,
     displayName: row.display_name,
     createdAt: row.created_at,
-    archivedAt: row.archived_at,
     supportedBy: targetKindsAccepting(row.id).map((k) => k.manifest.id),
     buildCount: findReferences(db, 'package_types', row.id).count,
   };
@@ -98,17 +95,9 @@ export function findPackageType(db: Db, id: string): PackageType | undefined {
   return row === undefined ? undefined : toPackageType(db, row);
 }
 
-export interface ListPackageTypesOptions {
-  readonly includeArchived?: boolean;
-}
-
-export function listPackageTypes(
-  db: Db,
-  options: ListPackageTypesOptions = {},
-): PackageType[] {
-  const where = options.includeArchived === true ? '' : 'WHERE archived_at IS NULL';
+export function listPackageTypes(db: Db): PackageType[] {
   return db
-    .prepare<[], PackageTypeRow>(`SELECT * FROM package_types ${where} ORDER BY id`)
+    .prepare<[], PackageTypeRow>('SELECT * FROM package_types ORDER BY id')
     .all()
     .map((row) => toPackageType(db, row));
 }
@@ -126,16 +115,12 @@ export function renamePackageType(db: Db, id: string, displayName: string): Pack
   return getPackageType(db, id);
 }
 
-/** 归档：被构建引用的包类型只能走这条路。 */
-export function archivePackageType(db: Db, id: string): void {
-  archive(db, 'package_types', id);
-}
-
-export function unarchivePackageType(db: Db, id: string): void {
-  unarchive(db, 'package_types', id);
-}
-
-/** 物理删除，被构建引用时抛 ReferencedError。 */
+/**
+ * 删除包类型。被任何构建记录引用时抛 ReferencedError。
+ *
+ * 注意插件声明的包类型（当前是 h5 与 wechat）删掉后，下次启动会被
+ * `seedPackageTypes` 补回来——它们是插件能工作的前提，不是用户数据。
+ */
 export function deletePackageType(db: Db, id: string): void {
   deleteIfUnreferenced(db, 'package_types', id);
 }
@@ -150,9 +135,6 @@ export function requireActivePackageType(db: Db, id: string): PackageType {
   const type = findPackageType(db, id);
   if (type === undefined) {
     throw new Error(`包类型「${id}」未登记`);
-  }
-  if (type.archivedAt !== null) {
-    throw new Error(`包类型「${id}」已归档，不再接受新的构建上报`);
   }
   return type;
 }

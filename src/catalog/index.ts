@@ -2,23 +2,22 @@
  * 登记册：游戏与包类型。两者都是纯数据（design.md D2）。
  */
 export {
-  archiveGame,
+  countGameDependents,
   createGame,
+  deleteGameCascade,
   findGameBySlug,
   getGame,
   listGames,
   renameGame,
   requireActiveGame,
-  unarchiveGame,
   type CreateGameInput,
   type Game,
-  type ListGamesOptions,
+  type GameDeletionImpact,
 } from './games.js';
 
 export { seedPackageTypes, type SeedPackageTypesResult } from './seed.js';
 
 export {
-  archivePackageType,
   createPackageType,
   deletePackageType,
   findPackageType,
@@ -26,8 +25,6 @@ export {
   listPackageTypes,
   renamePackageType,
   requireActivePackageType,
-  unarchivePackageType,
   type CreatePackageTypeInput,
-  type ListPackageTypesOptions,
   type PackageType,
 } from './package-types.js';

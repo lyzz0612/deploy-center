@@ -24,8 +24,8 @@ Content-Type: application/json
 
 | 字段 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `game` | 是 | string | 游戏 slug，必须已登记且未归档 |
-| `packageType` | 是 | string | 包类型 id，必须已登记且未归档 |
+| `game` | 是 | string | 游戏 slug，必须已登记 |
+| `packageType` | 是 | string | 包类型 id，必须已登记 |
 | `buildId` | 是 | string | 构建标识。与 `game`+`packageType` 一起构成幂等键 |
 | `artifactUrl` | 是 | string | 产物下载地址，必须是 http/https |
 | `sizeBytes` | 是 | int | 产物字节数，正整数 |

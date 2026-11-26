@@ -128,6 +128,9 @@ export function releaseDetailPage(db: Db, release: Release): Html {
     release.status !== 'queued' &&
     release.stages.some((s) => s.status !== 'success');
 
+  // 只有已结束的能删：queued 还在队列里等执行器取走，running 正在跑
+  const deletable = release.status !== 'running' && release.status !== 'queued';
+
   const stageCards = join(
     release.stages.map((stage) => {
       const attempts = listStageAttempts(db, release.id, stage.stageId);
@@ -245,7 +248,44 @@ export function releaseDetailPage(db: Db, release: Release): Html {
         ${rollbackSection}
       </div>
     </div>
+
+    ${sectionTitle('删除这条记录')}
+    <div class="panel">
+      <div class="panel-body">
+        ${deletable
+          ? html`
+              <p class="subtle" style="margin:0 0 12px">
+                删除后这条发布的阶段与日志一并消失，不可恢复。
+                删掉最后一条引用该目标的记录后，那个目标才可以被删除。
+              </p>
+              <form
+                method="post"
+                action="/releases/${release.id}/delete"
+                data-confirm="删除这条发布记录及其全部阶段日志？不可恢复。"
+              >
+                <button class="btn danger" type="submit">删除发布记录</button>
+              </form>
+            `
+          : html`
+              <p class="subtle" style="margin:0">
+                这条记录还在 ${statusText(release.status)}，不能删除。请先等它结束。
+              </p>
+            `}
+      </div>
+    </div>
   `;
+}
+
+/** 状态的中文说法，用于句子里。 */
+function statusText(status: Release['status']): string {
+  switch (status) {
+    case 'queued':
+      return '排队中';
+    case 'running':
+      return '执行中';
+    default:
+      return status;
+  }
 }
 
 /** 正在执行时自动刷新，让日志能看到进展。 */

@@ -9,7 +9,7 @@
  */
 import { randomUUID } from 'node:crypto';
 
-import { archive, deleteIfUnreferenced, findReferences, type Db } from '../db/index.js';
+import { deleteIfUnreferenced, findReferences, type Db } from '../db/index.js';
 import { getCredentialType, validateFields, type CredentialTypeId } from '../registry/index.js';
 import { decryptSecrets, encryptSecrets } from '../shared/crypto.js';
 import { ConflictError, NotFoundError } from '../shared/errors.js';
@@ -25,7 +25,6 @@ interface CredentialRow {
   readonly secrets: Buffer;
   readonly created_at: string;
   readonly updated_at: string;
-  readonly archived_at: string | null;
 }
 
 /** 对外可见的凭据信息。刻意没有 secrets 字段——类型层面就不给机会。 */
@@ -38,8 +37,11 @@ export interface CredentialSummary {
   readonly fieldsSet: Record<string, boolean>;
   readonly createdAt: string;
   readonly updatedAt: string;
-  readonly archivedAt: string | null;
-  /** 有多少发布目标在引用它。 */
+  /**
+   * 有多少发布目标在引用它。
+   *
+   * 界面用它决定删除按钮能不能点：0 可删，非 0 要先改掉那些目标。
+   */
   readonly referenceCount: number;
 }
 
@@ -72,7 +74,6 @@ function toSummary(db: Db, row: CredentialRow, masterKey: string): CredentialSum
     fieldsSet: fieldsSetOf(row.type, secrets),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    archivedAt: row.archived_at,
     referenceCount: findReferences(db, 'credentials', row.id).count,
   };
 }
@@ -141,8 +142,6 @@ export function getCredential(db: Db, id: string, masterKey: string): Credential
 }
 
 export interface ListCredentialsOptions {
-  /** 是否包含已归档的。缺省只列未归档的。 */
-  readonly includeArchived?: boolean;
   /** 只列某个类型的，用于「选择凭据」下拉框。 */
   readonly type?: string;
 }
@@ -154,9 +153,6 @@ export function listCredentials(
 ): CredentialSummary[] {
   const conditions: string[] = [];
   const params: string[] = [];
-  if (options.includeArchived !== true) {
-    conditions.push('archived_at IS NULL');
-  }
   if (options.type !== undefined) {
     conditions.push('type = ?');
     params.push(options.type);
@@ -228,12 +224,12 @@ export function readSecrets(db: Db, id: string, masterKey: string): Record<strin
   return decryptSecrets(readRow(db, id).secrets, masterKey);
 }
 
-/** 归档：被目标引用的凭据只能走这条路。 */
-export function archiveCredential(db: Db, id: string): void {
-  archive(db, 'credentials', id);
-}
-
-/** 物理删除，被引用时抛 ReferencedError。 */
+/**
+ * 删除凭据。被任何发布目标引用时抛 ReferencedError。
+ *
+ * 没有归档的选项：轮换密钥走 `updateCredential`（就地改，所有引用它的目标
+ * 同时生效），不再用的就删掉。
+ */
 export function deleteCredential(db: Db, id: string): void {
   deleteIfUnreferenced(db, 'credentials', id);
 }

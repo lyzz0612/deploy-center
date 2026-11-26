@@ -1,5 +1,4 @@
 export {
-  archiveCredential,
   createCredential,
   deleteCredential,
   getCredential,

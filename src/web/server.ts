@@ -128,7 +128,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: WebDeps): 
 
     if (path === '/api/ci/builds' && method === 'POST') {
       const report = parseBuildReport(await readJsonBody(req));
-      // 游戏与包类型必须已登记且未归档，查在写入之前，拒绝时零副作用。
+      // 游戏与包类型必须已登记，查在写入之前，拒绝时零副作用。
       const resolved = resolveReport(deps.db, report);
       const { build, created } = upsertBuild(deps.db, resolved, keyId);
       json(res, created ? 201 : 200, {
@@ -154,12 +154,10 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: WebDeps): 
     if (path === '/api/targets' && method === 'GET') {
       const gameId = url.searchParams.get('gameId');
       const acceptsPackageType = url.searchParams.get('acceptsPackageType');
-      const includeArchived = url.searchParams.get('includeArchived') === 'true';
       json(res, 200, {
         targets: listTargets(deps.db, {
           ...(gameId !== null && { gameId }),
           ...(acceptsPackageType !== null && { acceptsPackageType }),
-          includeArchived,
         }),
       });
       return;

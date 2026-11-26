@@ -277,11 +277,13 @@ describe('存量目标实例自检', () => {
     }
   });
 
-  it('归档的实例不参与检查', () => {
+  it('删掉实例后就不再报它（没有归档这个中间态）', () => {
     const db = freshDb();
     try {
       seedTarget(db, 'deleted-plugin', { bucket: 'b' });
-      db.prepare('UPDATE targets SET archived_at = ?').run(new Date().toISOString());
+      assert.equal(checkStoredTargets(db).length, 1, '插件未注册时应报告');
+
+      db.prepare('DELETE FROM targets').run();
       assert.deepEqual(checkStoredTargets(db), []);
     } finally {
       db.close();

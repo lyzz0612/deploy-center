@@ -10,15 +10,15 @@
  *
  * 两条贯穿全表的约定：
  *
- * - **归档用时间戳而不是布尔**（`archived_at`）。被引用的记录只允许归档、
- *   不允许物理删除（design.md D3），而「什么时候归档的」本身有用，
- *   用布尔还得再加一列存时间。
+ * - **没有归档位，删除就是真删除**（v6 起）。没有引用的记录可以直接删掉，
+ *   被引用的记录拒绝删除并告知引用来源（design.md D3）。一条「已归档」的
+ *   记录既不出现在候选列表里、又不能删，留着只是让人反复判断它还有没有用。
  * - **时间统一存 ISO-8601 文本**。SQLite 没有日期类型，文本可读、可排序、
  *   可直接比较，比存 epoch 数字更省心。
  */
 
 /** 当前结构版本。改 DDL 必须同时递增，并在 MIGRATIONS 里补一步。 */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 /**
  * 建表语句。顺序即依赖顺序（被引用的表在前）。
@@ -61,8 +61,7 @@ export const DDL: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS package_types (
      id           TEXT PRIMARY KEY,
      display_name TEXT NOT NULL,
-     created_at   TEXT NOT NULL,
-     archived_at  TEXT
+     created_at   TEXT NOT NULL
    )`,
 
   // 凭据：类型化的加密键值袋。字段集由 type 决定，不由目标类型决定。
@@ -73,8 +72,7 @@ export const DDL: readonly string[] = [
      type         TEXT NOT NULL,
      secrets      BLOB NOT NULL,
      created_at   TEXT NOT NULL,
-     updated_at   TEXT NOT NULL,
-     archived_at  TEXT
+     updated_at   TEXT NOT NULL
    )`,
 
   /* -------------------------------- 游戏级数据 ------------------------------- */
@@ -84,8 +82,7 @@ export const DDL: readonly string[] = [
      id           TEXT PRIMARY KEY,
      slug         TEXT NOT NULL UNIQUE,
      display_name TEXT NOT NULL,
-     created_at   TEXT NOT NULL,
-     archived_at  TEXT
+     created_at   TEXT NOT NULL
    )`,
 
   // 发布目标实例。kind 是代码侧注册的目标类型 id（不建外键，它不在库里）。
@@ -105,8 +102,7 @@ export const DDL: readonly string[] = [
      location       TEXT NOT NULL,
      location_key   TEXT NOT NULL,
      created_at     TEXT NOT NULL,
-     updated_at     TEXT NOT NULL,
-     archived_at    TEXT
+     updated_at     TEXT NOT NULL
    )`,
 
   // 同一游戏内不允许「同类型 + 同凭据 + 同位置」的重复实例：那是互相覆盖
@@ -146,8 +142,9 @@ export const DDL: readonly string[] = [
   // 发布记录。维度是「构建 × 目标」而非「构建 × 平台」：同一构建可以发到
   // 正式号和测试号，同一 H5 包可以发到生产和灰度。
   //
-  // build 与 target 的外键刻意不加 ON DELETE：被发布记录引用的目标只能归档，
-  // 物理删除由 API 层拦截（design.md D3）。
+  // build 与 target 的外键刻意不加 ON DELETE：被发布记录引用的目标不允许
+  // 删除，拦截在 API 层做并告知引用来源（design.md D3）。想删这样的目标，
+  // 得先清掉它的发布记录。
   `CREATE TABLE IF NOT EXISTS releases (
      id           TEXT PRIMARY KEY,
      build_id     TEXT NOT NULL REFERENCES builds(id),
@@ -228,17 +225,33 @@ export const DDL: readonly string[] = [
  * 回滚通道，破坏性迁移一旦写错就没有退路。改列语义或删列应另开一次
  * 完整的设计与备份流程，而不是塞进这张表。
  */
+/**
+ * 一条升级语句。
+ *
+ * `requires` 列出它读写的表；其中任何一张不存在时整条语句跳过。
+ * 为什么需要这个：一条迁移语句往往要跨表（v6 要按 releases 判断哪些
+ * targets 还有引用），而半成品库里那张表可能根本没建出来——那时正确的
+ * 行为是跳过，让后面的统一 DDL 把表建好，而不是在 `no such table` 上
+ * 炸掉整个启动。
+ */
+export interface MigrationStep {
+  readonly sql: string;
+  readonly requires: readonly string[];
+}
+
 export interface Migration {
   /** 升级到哪一版。 */
   readonly version: number;
-  readonly statements: readonly string[];
+  readonly statements: readonly MigrationStep[];
 }
 
 export const MIGRATIONS: readonly Migration[] = [
   {
     // v3 → v4：CI key 增加可逆密文列，用于在设置页随时查看与替换。
     version: 4,
-    statements: ['ALTER TABLE ci_keys ADD COLUMN token_encrypted BLOB'],
+    statements: [
+      { sql: 'ALTER TABLE ci_keys ADD COLUMN token_encrypted BLOB', requires: ['ci_keys'] },
+    ],
   },
   {
     // v4 → v5：吊销改为直接删除，去掉 revoked_at。
@@ -249,10 +262,85 @@ export const MIGRATIONS: readonly Migration[] = [
     // 当初由哪条 key 上报。
     version: 5,
     statements: [
-      `UPDATE builds SET ci_key_id = NULL
-         WHERE ci_key_id IN (SELECT id FROM ci_keys WHERE revoked_at IS NOT NULL)`,
-      'DELETE FROM ci_keys WHERE revoked_at IS NOT NULL',
-      'ALTER TABLE ci_keys DROP COLUMN revoked_at',
+      {
+        sql: `UPDATE builds SET ci_key_id = NULL
+                WHERE ci_key_id IN (SELECT id FROM ci_keys WHERE revoked_at IS NOT NULL)`,
+        requires: ['builds', 'ci_keys'],
+      },
+      { sql: 'DELETE FROM ci_keys WHERE revoked_at IS NOT NULL', requires: ['ci_keys'] },
+      { sql: 'ALTER TABLE ci_keys DROP COLUMN revoked_at', requires: ['ci_keys'] },
+    ],
+  },
+  {
+    // v5 → v6：去掉归档机制，删除就是真删除。
+    //
+    // 已归档的存量记录分两种处置：**没有引用的直接删掉**（它被归档就是
+    // 「不想要了」的意思），**还被引用的恢复成正常**（它仍在被使用，
+    // 而新模型里没有「不可用但删不掉」这个状态）。
+    //
+    // 删除顺序由依赖倒序决定：先删目标（它引用凭据与游戏），再删凭据与
+    // 包类型，最后才删游戏。反过来会撞上外键。
+    //
+    // 游戏在新模型里走级联删除，但迁移这里不级联：一个被归档却仍挂着
+    // 构建或目标的游戏，恢复成正常远比悄悄删掉它名下所有历史安全。
+    version: 6,
+    statements: [
+      // 1. 目标：没有发布记录引用的已归档目标直接删
+      {
+        sql: `DELETE FROM targets
+                WHERE archived_at IS NOT NULL
+                  AND id NOT IN (SELECT target_id FROM releases)`,
+        requires: ['targets', 'releases'],
+      },
+      {
+        sql: 'UPDATE targets SET archived_at = NULL WHERE archived_at IS NOT NULL',
+        requires: ['targets'],
+      },
+
+      // 2. 凭据：没有目标引用的已归档凭据直接删
+      {
+        sql: `DELETE FROM credentials
+                WHERE archived_at IS NOT NULL
+                  AND id NOT IN (
+                    SELECT credential_id FROM targets WHERE credential_id IS NOT NULL
+                  )`,
+        requires: ['credentials', 'targets'],
+      },
+      {
+        sql: 'UPDATE credentials SET archived_at = NULL WHERE archived_at IS NOT NULL',
+        requires: ['credentials'],
+      },
+
+      // 3. 包类型：没有构建引用的已归档包类型直接删
+      {
+        sql: `DELETE FROM package_types
+                WHERE archived_at IS NOT NULL
+                  AND id NOT IN (SELECT package_type_id FROM builds)`,
+        requires: ['package_types', 'builds'],
+      },
+      {
+        sql: 'UPDATE package_types SET archived_at = NULL WHERE archived_at IS NOT NULL',
+        requires: ['package_types'],
+      },
+
+      // 4. 游戏：既没有构建也没有目标的已归档游戏直接删
+      {
+        sql: `DELETE FROM games
+                WHERE archived_at IS NOT NULL
+                  AND id NOT IN (SELECT game_id FROM builds)
+                  AND id NOT IN (SELECT game_id FROM targets)`,
+        requires: ['games', 'builds', 'targets'],
+      },
+      {
+        sql: 'UPDATE games SET archived_at = NULL WHERE archived_at IS NOT NULL',
+        requires: ['games'],
+      },
+
+      // 5. 列本身去掉
+      { sql: 'ALTER TABLE targets DROP COLUMN archived_at', requires: ['targets'] },
+      { sql: 'ALTER TABLE credentials DROP COLUMN archived_at', requires: ['credentials'] },
+      { sql: 'ALTER TABLE package_types DROP COLUMN archived_at', requires: ['package_types'] },
+      { sql: 'ALTER TABLE games DROP COLUMN archived_at', requires: ['games'] },
     ],
   },
 ];

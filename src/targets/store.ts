@@ -11,11 +11,9 @@ import { randomUUID } from 'node:crypto';
 
 import { getCredential } from '../credentials/index.js';
 import {
-  archive,
   deleteIfUnreferenced,
   findReferences,
   locationKey,
-  unarchive,
   type Db,
 } from '../db/index.js';
 import {
@@ -40,7 +38,6 @@ interface TargetRow {
   readonly location_key: string;
   readonly created_at: string;
   readonly updated_at: string;
-  readonly archived_at: string | null;
 }
 
 export interface Target {
@@ -54,10 +51,13 @@ export interface Target {
   readonly location: Record<string, unknown>;
   readonly createdAt: string;
   readonly updatedAt: string;
-  readonly archivedAt: string | null;
   /** 该 kind 接受哪些包类型，供发布入口过滤。 */
   readonly accepts: readonly string[];
-  /** 有多少发布记录引用它。 */
+  /**
+   * 有多少发布记录引用它。
+   *
+   * 界面用它决定删除按钮能不能点：0 可删，非 0 要先清掉那些发布记录。
+   */
   readonly releaseCount: number;
 }
 
@@ -84,7 +84,6 @@ function toTarget(db: Db, row: TargetRow): Target {
     location: JSON.parse(row.location) as Record<string, unknown>,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    archivedAt: row.archived_at,
     accepts,
     releaseCount: findReferences(db, 'targets', row.id).count,
   };
@@ -115,9 +114,6 @@ function validateCredential(db: Db, kind: TargetKind, credentialId: string | nul
       `凭据「${credential.name}」的类型是 ${credential.type}，` +
         `而 ${kind.manifest.displayName} 需要 ${required}`,
     );
-  }
-  if (credential.archivedAt !== null) {
-    throw new Error(`凭据「${credential.name}」已归档，不能用于新的发布目标`);
   }
 }
 
@@ -208,7 +204,6 @@ export function getTarget(db: Db, id: string): Target {
 
 export interface ListTargetsOptions {
   readonly gameId?: string;
-  readonly includeArchived?: boolean;
   /**
    * 只列能接受该包类型的目标。
    *
@@ -225,9 +220,6 @@ export function listTargets(db: Db, options: ListTargetsOptions = {}): Target[] 
   if (options.gameId !== undefined) {
     conditions.push('game_id = ?');
     params.push(options.gameId);
-  }
-  if (options.includeArchived !== true) {
-    conditions.push('archived_at IS NULL');
   }
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
@@ -294,16 +286,13 @@ export function updateTarget(
   return getTarget(db, id);
 }
 
-/** 归档：被发布记录引用的目标只能走这条路。 */
-export function archiveTarget(db: Db, id: string): void {
-  archive(db, 'targets', id);
-}
-
-export function unarchiveTarget(db: Db, id: string): void {
-  unarchive(db, 'targets', id);
-}
-
-/** 物理删除，有发布历史时抛 ReferencedError。 */
+/**
+ * 删除目标。有发布历史时抛 ReferencedError。
+ *
+ * 想删一个发过版的目标，得先清掉它的发布记录
+ * （`deleteReleasesByTarget`）。这一步是刻意留着的：发布历史是「线上曾经
+ * 是什么版本」的唯一记录，不该被删目标的动作顺手带走。
+ */
 export function deleteTarget(db: Db, id: string): void {
   deleteIfUnreferenced(db, 'targets', id);
 }
@@ -316,9 +305,6 @@ export function deleteTarget(db: Db, id: string): void {
  */
 export function requirePublishableTarget(db: Db, id: string, packageTypeId: string): Target {
   const target = getTarget(db, id);
-  if (target.archivedAt !== null) {
-    throw new Error(`目标「${target.name}」已归档，不能用于新的发布`);
-  }
   if (!target.accepts.includes(packageTypeId)) {
     // 用 ConflictError 而不是普通 Error：请求本身合法，是与当前状态冲突，
     // 该回 409 而不是 400，让调用方能区分「我填错了」和「这个组合不成立」。

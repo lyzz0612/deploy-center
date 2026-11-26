@@ -4,6 +4,8 @@ export { recoverRelease, type RecoveredRelease } from './recover.js';
 export {
   appendStageLog,
   createRelease,
+  deleteRelease,
+  deleteReleasesByTarget,
   finishStage,
   getRelease,
   listReleases,

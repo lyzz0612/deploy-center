@@ -279,6 +279,63 @@ export function prepareRetry(db: Db, releaseId: string): { fromStageId: string }
   return { fromStageId: firstUnfinished.stageId };
 }
 
+/** 已结束的状态。只有这些状态的发布记录可以删。 */
+const FINISHED_STATUSES: readonly JobStatus[] = ['success', 'failed', 'timeout', 'cancelled'];
+
+/**
+ * 删除一条发布记录及其阶段历史。
+ *
+ * 只允许删已结束的：`queued` 还在队列里等着被执行器取走，`running` 正在
+ * 跑——删掉它们会让执行器写回一条已经不存在的记录，而那个失败会出现在
+ * 离原因很远的地方。想删正在跑的，先取消它。
+ *
+ * 删掉最后一条引用某目标的记录后，那个目标就变成「无引用」、于是可删。
+ * 这是刻意的连锁：清掉历史是让目标可删的前置动作。
+ */
+export function deleteRelease(db: Db, id: string): void {
+  const release = getRelease(db, id);
+  if (!FINISHED_STATUSES.includes(release.status)) {
+    throw new Error(
+      `发布记录处于 ${release.status} 状态，不能删除。请先等它结束或取消它`,
+    );
+  }
+
+  db.transaction(() => {
+    // 阶段表有 ON DELETE CASCADE，但显式删一遍不依赖 PRAGMA foreign_keys
+    db.prepare('DELETE FROM release_stages WHERE release_id = ?').run(id);
+    db.prepare('DELETE FROM releases WHERE id = ?').run(id);
+  })();
+}
+
+/**
+ * 清掉某个目标名下的全部**已结束**发布记录，返回删了几条。
+ *
+ * 用途是「这个目标不要了」：逐条删几十条历史不现实，而未结束的记录保持
+ * 不动——它们还在被执行器用着。所以这个函数清完之后目标仍可能有引用，
+ * 调用方不该假设它一定能删掉了。
+ */
+export function deleteReleasesByTarget(db: Db, targetId: string): number {
+  const placeholders = FINISHED_STATUSES.map(() => '?').join(', ');
+  let deleted = 0;
+
+  db.transaction(() => {
+    const doomed = db
+      .prepare<string[], { id: string }>(
+        `SELECT id FROM releases WHERE target_id = ? AND status IN (${placeholders})`,
+      )
+      .all(targetId, ...FINISHED_STATUSES)
+      .map((r) => r.id);
+
+    if (doomed.length === 0) return;
+    const ids = doomed.map(() => '?').join(', ');
+    db.prepare(`DELETE FROM release_stages WHERE release_id IN (${ids})`).run(...doomed);
+    db.prepare(`DELETE FROM releases WHERE id IN (${ids})`).run(...doomed);
+    deleted = doomed.length;
+  })();
+
+  return deleted;
+}
+
 /** 取某个阶段的全部尝试历史，用于界面展开查看。 */
 export function listStageAttempts(db: Db, releaseId: string, stageId: string): StageRecord[] {
   return db

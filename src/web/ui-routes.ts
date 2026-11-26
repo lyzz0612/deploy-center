@@ -20,16 +20,36 @@ import {
   updateCiKey,
 } from '../auth/store.js';
 import { getBuild } from '../builds/index.js';
-import { createGame, createPackageType, findGameBySlug, getGame } from '../catalog/index.js';
+import {
+  createGame,
+  createPackageType,
+  deleteGameCascade,
+  deletePackageType,
+  findGameBySlug,
+  getGame,
+} from '../catalog/index.js';
 import { switchVersion } from '../cli/index.js';
-import { archiveCredential, createCredential } from '../credentials/index.js';
-import { archive, unarchive, type Db } from '../db/index.js';
+import { createCredential, deleteCredential } from '../credentials/index.js';
+import type { Db } from '../db/index.js';
 import { enqueue } from '../jobs/index.js';
 import { getCredentialType, getTargetKind } from '../registry/index.js';
-import { createRelease, getRelease, prepareRetry, ROLLBACK_STAGE_ID } from '../releases/index.js';
+import {
+  createRelease,
+  deleteRelease,
+  deleteReleasesByTarget,
+  getRelease,
+  prepareRetry,
+  ROLLBACK_STAGE_ID,
+} from '../releases/index.js';
 import type { RuntimeConfig } from '../shared/config.js';
 import { ConflictError, NotFoundError } from '../shared/errors.js';
-import { createTarget, getTarget, requirePublishableTarget } from '../targets/index.js';
+import { toHttpError } from './errors.js';
+import {
+  createTarget,
+  deleteTarget,
+  getTarget,
+  requirePublishableTarget,
+} from '../targets/index.js';
 import { collectFields, readFormBody, requireField } from './forms.js';
 import { layout, raw, type Crumb, type Html } from './html.js';
 import { loginPage, setupPage } from './pages/auth.js';
@@ -130,6 +150,24 @@ function noticeFromQuery(url: URL): SettingsFlash {
       };
     case 'cli-switched':
       return { message: 'CLI 版本已切换。' };
+    case 'releases-purged': {
+      const n = url.searchParams.get('n') ?? '0';
+      return {
+        message:
+          n === '0'
+            ? '没有可清除的发布记录（正在执行的不会被删）。'
+            : `已删除 ${n} 条已结束的发布记录。若该目标已无引用，现在可以删除它。`,
+      };
+    }
+    case 'game-deleted': {
+      const name = url.searchParams.get('name') ?? '';
+      const b = url.searchParams.get('b') ?? '0';
+      const t = url.searchParams.get('t') ?? '0';
+      const r = url.searchParams.get('r') ?? '0';
+      return {
+        message: `已删除游戏${name === '' ? '' : `「${name}」`}，连带 ${t} 个目标、${b} 条构建、${r} 条发布记录。`,
+      };
+    }
     default:
       return {};
   }
@@ -143,8 +181,10 @@ function errorPage(
   error: unknown,
   fallbackBack: string,
 ): void {
-  const message = error instanceof Error ? error.message : String(error);
-  const status = error instanceof NotFoundError ? 404 : error instanceof ConflictError ? 409 : 400;
+  // 复用 API 那套映射，而不是在这里再写一遍：之前这里漏了
+  // ReferencedError，于是「正被引用」在页面上回 400、在接口上回 409，
+  // 同一个拒绝有两个状态码。
+  const { status, message } = toHttpError(error);
   send(
     res,
     status,
@@ -265,7 +305,11 @@ export async function handleUi(
     /* --------------------------------- 游戏 --------------------------------- */
 
     if (path === '/' && method === 'GET') {
-      page(res, { title: '游戏', body: gamesListPage(deps.db), pathname: path });
+      page(res, {
+        title: '游戏',
+        body: gamesListPage(deps.db, noticeFromQuery(url)),
+        pathname: path,
+      });
       return true;
     }
 
@@ -299,6 +343,30 @@ export async function handleUi(
         pathname: path,
         crumbs: [{ label: '游戏', href: '/' }, { label: game.displayName }],
       });
+      return true;
+    }
+
+    const gameDeleteMatch = /^\/games\/([a-z0-9][a-z0-9-]*)\/delete$/.exec(path);
+    if (gameDeleteMatch !== null && method === 'POST') {
+      const slug = gameDeleteMatch[1]!;
+      const game = findGameBySlug(deps.db, slug);
+      if (game === undefined) throw new NotFoundError(`游戏 ${slug} 不存在`);
+
+      // 要求把 slug 抄一遍。级联删除没有撤销入口，光一个 confirm 弹窗
+      // 挡不住误点——尤其这个按钮和「添加发布目标」在同一个页面上。
+      const form = await readFormBody(req);
+      if ((form.get('confirmSlug') ?? '').trim() !== game.slug) {
+        throw new Error(
+          `确认失败：请准确输入 slug「${game.slug}」。游戏及其名下数据未被删除`,
+        );
+      }
+
+      const impact = deleteGameCascade(deps.db, game.id);
+      redirect(
+        res,
+        `/?notice=game-deleted&name=${encodeURIComponent(game.displayName)}` +
+          `&b=${String(impact.builds)}&t=${String(impact.targets)}&r=${String(impact.releases)}`,
+      );
       return true;
     }
 
@@ -359,7 +427,7 @@ export async function handleUi(
       }
       page(res, {
         title: target.name,
-        body: await targetDetailPage(ui, target),
+        body: await targetDetailPage(ui, target, noticeFromQuery(url)),
         pathname: path,
         crumbs: [
           { label: '游戏', href: '/' },
@@ -370,12 +438,24 @@ export async function handleUi(
       return true;
     }
 
-    const archiveMatch = /^\/targets\/([0-9a-f-]+)\/(archive|unarchive)$/.exec(path);
-    if (archiveMatch !== null && method === 'POST') {
-      const [, targetId, action] = archiveMatch as unknown as [string, string, string];
-      if (action === 'archive') archive(deps.db, 'targets', targetId);
-      else unarchive(deps.db, 'targets', targetId);
-      redirect(res, backTo(req, `/targets/${targetId}`));
+    const targetDeleteMatch = /^\/targets\/([0-9a-f-]+)\/delete$/.exec(path);
+    if (targetDeleteMatch !== null && method === 'POST') {
+      const targetId = targetDeleteMatch[1]!;
+      // 先取游戏，否则删完就查不到该回哪个页面了
+      const target = getTarget(deps.db, targetId);
+      const game = deps.db
+        .prepare<[string], { slug: string }>('SELECT slug FROM games WHERE id = ?')
+        .get(target.gameId);
+      deleteTarget(deps.db, targetId);
+      redirect(res, game === undefined ? '/' : `/games/${game.slug}`);
+      return true;
+    }
+
+    const purgeMatch = /^\/targets\/([0-9a-f-]+)\/releases\/purge$/.exec(path);
+    if (purgeMatch !== null && method === 'POST') {
+      const targetId = purgeMatch[1]!;
+      const removed = deleteReleasesByTarget(deps.db, targetId);
+      redirect(res, `/targets/${targetId}?notice=releases-purged&n=${String(removed)}`);
       return true;
     }
 
@@ -464,6 +544,16 @@ export async function handleUi(
       prepareRetry(deps.db, releaseId);
       enqueue(deps.db, 'publish', releaseId);
       redirect(res, `/releases/${releaseId}`);
+      return true;
+    }
+
+    const releaseDeleteMatch = /^\/releases\/([0-9a-f-]+)\/delete$/.exec(path);
+    if (releaseDeleteMatch !== null && method === 'POST') {
+      const releaseId = releaseDeleteMatch[1]!;
+      // 删完这条记录就查不到它属于哪个目标了，所以先取出来
+      const target = getRelease(deps.db, releaseId).targetId;
+      deleteRelease(deps.db, releaseId);
+      redirect(res, backTo(req, `/targets/${target}`));
       return true;
     }
 
@@ -599,9 +689,9 @@ export async function handleUi(
       return true;
     }
 
-    const credArchiveMatch = /^\/settings\/credentials\/([0-9a-f-]+)\/archive$/.exec(path);
-    if (credArchiveMatch !== null && method === 'POST') {
-      archiveCredential(deps.db, credArchiveMatch[1]!);
+    const credDeleteMatch = /^\/settings\/credentials\/([0-9a-f-]+)\/delete$/.exec(path);
+    if (credDeleteMatch !== null && method === 'POST') {
+      deleteCredential(deps.db, credDeleteMatch[1]!);
       redirect(res, '/settings/credentials');
       return true;
     }
@@ -636,6 +726,14 @@ export async function handleUi(
         id: requireField(form, 'id', '标识'),
         displayName: requireField(form, 'displayName', '显示名'),
       });
+      redirect(res, '/settings/package-types');
+      return true;
+    }
+
+    // 包类型 id 不是 uuid，用和创建时同一套字符集
+    const typeDeleteMatch = /^\/settings\/package-types\/([a-z0-9][a-z0-9-]*)\/delete$/.exec(path);
+    if (typeDeleteMatch !== null && method === 'POST') {
+      deletePackageType(deps.db, typeDeleteMatch[1]!);
       redirect(res, '/settings/package-types');
       return true;
     }

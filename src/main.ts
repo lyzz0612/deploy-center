@@ -17,7 +17,7 @@ import { startWeb } from './web/server.js';
 
 function listPackageTypeIds(db: Db): string[] {
   return db
-    .prepare<[], { id: string }>('SELECT id FROM package_types WHERE archived_at IS NULL')
+    .prepare<[], { id: string }>('SELECT id FROM package_types')
     .all()
     .map((r) => r.id);
 }

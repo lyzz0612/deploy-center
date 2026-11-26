@@ -210,7 +210,7 @@ export async function publishPage(
   data: PublishPageData,
 ): Promise<Html> {
   const { db } = deps;
-  const game = listGames(db, { includeArchived: true }).find((g) => g.slug === data.gameSlug);
+  const game = listGames(db).find((g) => g.slug === data.gameSlug);
   const candidates = listTargets(db, {
     ...(game !== undefined && { gameId: game.id }),
     acceptsPackageType: data.packageTypeId,

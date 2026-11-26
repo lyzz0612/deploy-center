@@ -71,14 +71,21 @@ export interface EnsureSchemaResult {
 /**
  * 按版本顺序执行升级语句。
  *
- * 只跑 fromVersion 之后、当前版本之前的步骤；每一步都是可叠加的 DDL，
- * 重复执行不至于毁数据（ALTER 加列在正常路径下只会跑一次）。
+ * 只跑 fromVersion 之后、当前版本之前的步骤。
+ *
+ * 每一步声明了它依赖哪些表，缺任何一张就跳过：跨表的清理语句（v6 要按
+ * releases 判断哪些 targets 还有引用）在半成品库里会撞上 `no such table`，
+ * 而那时正确的行为是跳过——没有那张表就意味着没有要清理的数据，随后的
+ * 统一 DDL 会把表按新结构建好。
  */
 function applyMigrations(db: Db, fromVersion: number): void {
+  const existing = listObjects(db, 'table');
+
   for (const migration of MIGRATIONS) {
     if (migration.version <= fromVersion || migration.version > SCHEMA_VERSION) continue;
-    for (const statement of migration.statements) {
-      db.exec(statement);
+    for (const step of migration.statements) {
+      if (!step.requires.every((table) => existing.has(table))) continue;
+      db.exec(step.sql);
     }
   }
 }

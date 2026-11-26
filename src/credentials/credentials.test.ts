@@ -5,7 +5,6 @@ import { describe, it } from 'node:test';
 import { ensureSchema, locationKey, open, ReferencedError, type Db } from '../db/index.js';
 import { listCredentialTypes } from '../registry/index.js';
 import {
-  archiveCredential,
   createCredential,
   deleteCredential,
   getCredential,
@@ -255,13 +254,13 @@ describe('读取凭据', () => {
     }
   });
 
-  it('缺省不列已归档的', () => {
+  it('删除后不再出现在列表里（没有归档这个中间态）', () => {
     const db = freshDb();
     try {
       const c = createCredential(db, { name: 'c', type: 'secretText', secrets: { secret: 'a' } }, KEY);
-      archiveCredential(db, c.id);
+      assert.equal(listCredentials(db, KEY).length, 1);
+      deleteCredential(db, c.id);
       assert.equal(listCredentials(db, KEY).length, 0);
-      assert.equal(listCredentials(db, KEY, { includeArchived: true }).length, 1);
     } finally {
       db.close();
     }
@@ -427,12 +426,14 @@ describe('引用计数与删除', () => {
     }
   });
 
-  it('未被引用时可以删除', () => {
+  it('未被引用时可以删除，且真的从库里消失', () => {
     const db = freshDb();
     try {
       const c = createCredential(db, { name: 'c', type: 'file', secrets: { content: 'x' } }, KEY);
       deleteCredential(db, c.id);
-      assert.equal(listCredentials(db, KEY, { includeArchived: true }).length, 0);
+      assert.equal(listCredentials(db, KEY).length, 0);
+      const row = db.prepare<[], { n: number }>('SELECT COUNT(*) AS n FROM credentials').get();
+      assert.equal(row?.n, 0, '不是软删除，密文也该一起消失');
     } finally {
       db.close();
     }

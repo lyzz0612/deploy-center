@@ -6,24 +6,22 @@ import { ensureSchema, open, ReferencedError, type Db } from '../db/index.js';
 import { registerTargetKind, resetTargetKinds } from '../registry/index.js';
 import type { TargetKind } from '../registry/index.js';
 import {
-  archiveGame,
+  countGameDependents,
   createGame,
+  deleteGameCascade,
   findGameBySlug,
   getGame,
   listGames,
   renameGame,
   requireActiveGame,
-  unarchiveGame,
 } from './games.js';
 import {
-  archivePackageType,
   createPackageType,
   deletePackageType,
   getPackageType,
   listPackageTypes,
   renamePackageType,
   requireActivePackageType,
-  unarchivePackageType,
 } from './package-types.js';
 
 function freshDb(): Db {
@@ -69,7 +67,6 @@ describe('游戏：创建', () => {
       const game = createGame(db, { slug: 'demo', displayName: '示例游戏' });
       assert.equal(game.slug, 'demo');
       assert.equal(game.displayName, '示例游戏');
-      assert.equal(game.archivedAt, null);
       assert.equal(findGameBySlug(db, 'demo')?.id, game.id);
     } finally {
       db.close();
@@ -138,61 +135,118 @@ describe('游戏：slug 只读', () => {
   });
 });
 
-describe('游戏：归档', () => {
-  it('归档后不再接受上报，历史仍可读', () => {
+describe('游戏：删除（级联）', () => {
+  /** 建一套完整数据：游戏 + 包类型 + 构建 + 目标 + 发布记录（含阶段）。 */
+  function seedFullGame(db: Db, slug = 'demo'): { gameId: string; releaseId: string } {
+    const game = createGame(db, { slug, displayName: slug });
+    createPackageType(db, { id: 'wechat', displayName: '微信' });
+
+    const buildId = randomUUID();
+    db.prepare(
+      `INSERT INTO builds (id, game_id, package_type_id, build_id, artifact_url, size_bytes, sha256, reported_at)
+       VALUES (?, ?, 'wechat', 'b1', 'https://x/a.zip', 1, 'h', ?)`,
+    ).run(buildId, game.id, new Date().toISOString());
+
+    const targetId = randomUUID();
+    db.prepare(
+      `INSERT INTO targets (id, game_id, kind, name, location, location_key, created_at, updated_at)
+       VALUES (?, ?, 'wechat', '正式号', '{}', '{}', ?, ?)`,
+    ).run(targetId, game.id, new Date().toISOString(), new Date().toISOString());
+
+    const releaseId = randomUUID();
+    db.prepare(
+      `INSERT INTO releases (id, build_id, target_id, params, status, created_at)
+       VALUES (?, ?, ?, '{}', 'success', ?)`,
+    ).run(releaseId, buildId, targetId, new Date().toISOString());
+    db.prepare(
+      `INSERT INTO release_stages (id, release_id, stage_id, seq, attempt, status)
+       VALUES (?, ?, 'upload', 0, 1, 'success')`,
+    ).run(randomUUID(), releaseId);
+
+    return { gameId: game.id, releaseId };
+  }
+
+  it('删除前能数清会连带删掉什么', () => {
     const db = freshDb();
     try {
-      const game = createGame(db, { slug: 'demo', displayName: '示例' });
-      createPackageType(db, { id: 'wechat', displayName: '微信' });
-      seedBuild(db, game.id, 'wechat');
-
-      archiveGame(db, game.id);
-
-      // 上报被拒，且错误区分「未登记」与「已归档」
-      assert.throws(() => requireActiveGame(db, 'demo'), /已归档，不再接受新的构建上报/);
-      assert.throws(() => requireActiveGame(db, 'never-existed'), /未登记/);
-
-      // 历史记录仍可读
-      const builds = db
-        .prepare<[string], { n: number }>('SELECT COUNT(*) AS n FROM builds WHERE game_id = ?')
-        .get(game.id);
-      assert.equal(builds?.n, 1);
-      assert.equal(getGame(db, game.id).displayName, '示例');
+      const { gameId } = seedFullGame(db);
+      const impact = countGameDependents(db, gameId);
+      assert.deepEqual(impact, { builds: 1, targets: 1, releases: 1 });
     } finally {
       db.close();
     }
   });
 
-  it('缺省列表不含已归档的', () => {
+  it('级联删除：构建、目标、发布记录与阶段一起消失', () => {
     const db = freshDb();
     try {
-      const game = createGame(db, { slug: 'demo', displayName: 'A' });
-      archiveGame(db, game.id);
+      const { gameId } = seedFullGame(db);
+      const impact = deleteGameCascade(db, gameId);
+      assert.deepEqual(impact, { builds: 1, targets: 1, releases: 1 });
+
+      const count = (table: string): number =>
+        db.prepare<[], { n: number }>(`SELECT COUNT(*) AS n FROM ${table}`).get()?.n ?? 0;
+
+      assert.equal(count('games'), 0);
+      assert.equal(count('builds'), 0);
+      assert.equal(count('targets'), 0);
+      assert.equal(count('releases'), 0);
+      assert.equal(count('release_stages'), 0, '阶段日志不能留成孤儿');
+      // 包类型是全局数据，不该被某个游戏的删除带走
+      assert.equal(count('package_types'), 1);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('只删目标游戏，不碰别的游戏的数据', () => {
+    const db = freshDb();
+    try {
+      const keep = seedFullGame(db, 'keep');
+      const doomed = createGame(db, { slug: 'doomed', displayName: 'doomed' });
+      seedBuild(db, doomed.id, 'wechat');
+
+      deleteGameCascade(db, doomed.id);
+
+      assert.deepEqual(
+        listGames(db).map((g) => g.slug),
+        ['keep'],
+      );
+      const builds = db.prepare<[], { n: number }>('SELECT COUNT(*) AS n FROM builds').get();
+      assert.equal(builds?.n, 1, '只该留下 keep 的那条构建');
+      assert.equal(getGame(db, keep.gameId).slug, 'keep');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('删一个干净的游戏也能用（没有从属数据）', () => {
+    const db = freshDb();
+    try {
+      const game = createGame(db, { slug: 'empty', displayName: '空的' });
+      const impact = deleteGameCascade(db, game.id);
+      assert.deepEqual(impact, { builds: 0, targets: 0, releases: 0 });
       assert.equal(listGames(db).length, 0);
-      assert.equal(listGames(db, { includeArchived: true }).length, 1);
     } finally {
       db.close();
     }
   });
 
-  it('重复归档报错而不是静默成功', () => {
+  it('删不存在的游戏报错而不是静默成功', () => {
     const db = freshDb();
     try {
-      const game = createGame(db, { slug: 'demo', displayName: 'A' });
-      archiveGame(db, game.id);
-      assert.throws(() => archiveGame(db, game.id), /不存在或已归档/);
+      assert.throws(() => deleteGameCascade(db, 'no-such-id'), /不存在/);
     } finally {
       db.close();
     }
   });
 
-  it('可以取消归档', () => {
+  it('游戏没有停用态：只有「未登记」一种上报失败', () => {
     const db = freshDb();
     try {
-      const game = createGame(db, { slug: 'demo', displayName: 'A' });
-      archiveGame(db, game.id);
-      assert.equal(unarchiveGame(db, game.id).archivedAt, null);
+      createGame(db, { slug: 'demo', displayName: '示例' });
       assert.doesNotThrow(() => requireActiveGame(db, 'demo'));
+      assert.throws(() => requireActiveGame(db, 'never-existed'), /未登记/);
     } finally {
       db.close();
     }
@@ -301,31 +355,25 @@ describe('包类型：引用保护', () => {
     }
   });
 
-  it('未被引用时可以删除', () => {
+  it('未被引用时可以删除，且真的从库里消失', () => {
     const db = freshDb();
     try {
       createPackageType(db, { id: 'unused', displayName: '没人用' });
       deletePackageType(db, 'unused');
-      assert.equal(listPackageTypes(db, { includeArchived: true }).length, 0);
+      assert.equal(listPackageTypes(db).length, 0);
+      const row = db.prepare<[], { n: number }>('SELECT COUNT(*) AS n FROM package_types').get();
+      assert.equal(row?.n, 0, '不是软删除，库里不该还留着');
     } finally {
       db.close();
     }
   });
 
-  it('归档后不再接受上报，但历史构建仍指得到它', () => {
+  it('包类型没有停用态：登记了就能接受上报', () => {
     const db = freshDb();
     try {
-      const game = createGame(db, { slug: 'demo', displayName: 'A' });
       createPackageType(db, { id: 'wechat', displayName: '微信' });
-      seedBuild(db, game.id, 'wechat');
-
-      archivePackageType(db, 'wechat');
-      assert.throws(() => requireActivePackageType(db, 'wechat'), /已归档/);
-      assert.equal(listPackageTypes(db).length, 0);
-      assert.equal(getPackageType(db, 'wechat').buildCount, 1);
-
-      unarchivePackageType(db, 'wechat');
       assert.doesNotThrow(() => requireActivePackageType(db, 'wechat'));
+      assert.throws(() => requireActivePackageType(db, 'never-existed'), /未登记/);
     } finally {
       db.close();
     }

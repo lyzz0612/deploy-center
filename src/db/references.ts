@@ -1,17 +1,26 @@
 /**
- * 引用保护：被引用的记录只能归档，不能物理删除（design.md D3）。
+ * 引用保护：没有引用的记录可以直接删除，被引用的记录拒绝删除。
+ *
+ * 没有归档这个中间态。一条「已归档」的记录既不出现在候选列表里、又不能删，
+ * 留着只是让人每次打开设置页都要重新判断一遍它还有没有用。建错了就删掉，
+ * 还在用的就是在用——这两种状态之间不需要第三种。
  *
  * 为什么不靠数据库外键报错：外键只会抛一句 `FOREIGN KEY constraint failed`，
  * 既不说是谁在引用、也不说有几条。用户看到这句话无从下手。这里在删除前
  * 先查清引用来源，把「谁在用它」直接告诉用户。
  *
- * 三处保护用同一套声明驱动的机制，而不是三段各写一遍的 if：
+ * 四处保护用同一套声明驱动的机制，而不是四段各写一遍的 if：
  *
  *   PackageType ← Build.package_type_id
  *   Credential  ← Target.credential_id
  *   Target      ← Release.target_id
+ *   Game        ← Build.game_id / Target.game_id
  *
  * 新增一种受保护的实体 = 往 PROTECTED 里加一条，不改删除逻辑。
+ *
+ * 游戏是唯一的例外：它底下挂着构建、目标与发布历史，所以删游戏走
+ * `deleteGameCascade`（catalog/games.ts），而不是这里的「有引用就拒绝」。
+ * 它仍登记在 PROTECTED 里，因为「谁在引用这个游戏」要能查出来给用户看。
  */
 import type { Db } from './connection.js';
 
@@ -64,6 +73,20 @@ const PROTECTED: readonly ProtectedEntity[] = [
     table: 'targets',
     displayName: '发布目标',
     referencedBy: [{ table: 'releases', column: 'target_id', labelExpr: "'发布于 ' || created_at" }],
+  },
+  {
+    // 游戏走级联删除，不靠「有引用就拒绝」。登记在这里是为了能把
+    // 「删它会连带删掉什么」查出来展示给用户。
+    table: 'games',
+    displayName: '游戏',
+    referencedBy: [
+      {
+        table: 'builds',
+        column: 'game_id',
+        labelExpr: "'构建 ' || build_id",
+      },
+      { table: 'targets', column: 'game_id', labelExpr: "'目标 ' || name" },
+    ],
   },
 ];
 
@@ -130,7 +153,7 @@ export class ReferencedError extends Error {
     const what = entity?.displayName ?? table;
     const sampleText = check.samples.map((s) => `${s.table}: ${s.label}`).join('；');
     const more = check.count > check.samples.length ? ` 等 ${check.count} 条` : '';
-    super(`该${what}正被引用，只能归档不能删除。引用来源：${sampleText}${more}`);
+    super(`该${what}正被引用，不能删除。请先处理这些引用：${sampleText}${more}`);
     this.name = 'ReferencedError';
   }
 }
@@ -138,7 +161,8 @@ export class ReferencedError extends Error {
 /**
  * 物理删除，被引用时拒绝。
  *
- * 归档走 `archive`，两者分开是刻意的：删除要防误操作，归档不需要。
+ * 这是唯一的删除入口：没有「软删除」的版本可选，所以不存在「本想归档却
+ * 删掉了」或者反过来的误用。
  */
 export function deleteIfUnreferenced(db: Db, table: string, id: string): void {
   const entity = requireProtected(table);
@@ -149,30 +173,6 @@ export function deleteIfUnreferenced(db: Db, table: string, id: string): void {
   const result = db.prepare(`DELETE FROM ${entity.table} WHERE id = ?`).run(id);
   if (result.changes === 0) {
     throw new Error(`${table} 中没有 id 为 ${id} 的记录`);
-  }
-}
-
-/** 归档：保留记录与历史引用，只是不再出现在候选列表里。 */
-export function archive(db: Db, table: string, id: string): void {
-  const entity = requireProtected(table);
-  const result = db
-    .prepare(`UPDATE ${entity.table} SET archived_at = ? WHERE id = ? AND archived_at IS NULL`)
-    .run(new Date().toISOString(), id);
-  if (result.changes === 0) {
-    throw new Error(`${table} 中没有 id 为 ${id} 的未归档记录`);
-  }
-}
-
-/** 取消归档。 */
-export function unarchive(db: Db, table: string, id: string): void {
-  const entity = requireProtected(table);
-  const result = db
-    .prepare(
-      `UPDATE ${entity.table} SET archived_at = NULL WHERE id = ? AND archived_at IS NOT NULL`,
-    )
-    .run(id);
-  if (result.changes === 0) {
-    throw new Error(`${table} 中没有 id 为 ${id} 的已归档记录`);
   }
 }
 

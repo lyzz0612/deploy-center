@@ -40,7 +40,7 @@ import {
 
 /* -------------------------------- 游戏列表 -------------------------------- */
 
-export function gamesListPage(db: Db): Html {
+export function gamesListPage(db: Db, flash: { message?: string } = {}): Html {
   const games = listGames(db);
 
   const rows = games.map((game) => {
@@ -92,6 +92,9 @@ export function gamesListPage(db: Db): Html {
       lead: html`每款游戏有独立的发布目标与构建历史。slug 会出现在 CI 上报里，创建后不可更改。`,
       actions: html`<a class="btn" href="/games/new">新建游戏</a>`,
     })}
+    ${flash.message === undefined
+      ? html``
+      : html`<div class="notice ok">${flash.message}</div>`}
     ${table}
   `;
 }
@@ -163,8 +166,8 @@ function renderLocation(location: Record<string, unknown>): Html {
 
 export async function gameDetailPage(deps: GameDetailDeps, game: Game): Promise<Html> {
   const { db } = deps;
-  const targets = listTargets(db, { gameId: game.id, includeArchived: true });
-  const credentials = listCredentials(db, deps.masterKey, { includeArchived: true });
+  const targets = listTargets(db, { gameId: game.id });
+  const credentials = listCredentials(db, deps.masterKey);
   const credentialName = new Map(credentials.map((c) => [c.id, c.name]));
   const packageTypes = listPackageTypes(db);
 
@@ -182,13 +185,11 @@ export async function gameDetailPage(deps: GameDetailDeps, game: Game): Promise<
       .get(game.id)?.n ?? 0;
 
   const rows = targets.map((target) => {
-    const archived = target.archivedAt !== null;
     return html`
       <tr>
         <td>
           <div class="cell-title">
             <a href="/targets/${target.id}">${target.name}</a>
-            ${archived ? html`<span class="badge muted">已归档</span>` : html``}
           </div>
           <div class="cell-sub">${target.kindDisplayName}</div>
         </td>
@@ -220,7 +221,7 @@ export async function gameDetailPage(deps: GameDetailDeps, game: Game): Promise<
           <div class="panel">
             <div class="panel-head">
               <span class="panel-title">发布目标</span>
-              <span class="subtle">${targets.filter((t) => t.archivedAt === null).length} 个在用</span>
+              <span class="subtle">${String(targets.length)} 个</span>
             </div>
             <div class="table-wrap">
               <table class="table targets-table">
@@ -266,6 +267,35 @@ export async function gameDetailPage(deps: GameDetailDeps, game: Game): Promise<
           环境与连通性检查在目标详情页现跑：列表页不主动探测平台，避免每次打开都等网络。
           最近发布可以从 <a href="/releases">发布记录</a> 查看。
         </p>
+      </div>
+    </div>
+
+    ${sectionTitle('删除这个游戏')}
+    <div class="panel">
+      <div class="panel-body">
+        <p style="margin:0 0 12px">
+          删除会连带删掉这个游戏名下的
+          <strong>${String(targets.length)} 个发布目标</strong>、
+          <strong>${String(buildCount)} 条构建记录</strong>与
+          <strong>${String(releaseCount)} 条发布记录</strong>。
+          <span class="subtle">不可恢复，也不会留下历史。</span>
+        </p>
+        <form
+          method="post"
+          action="/games/${game.slug}/delete"
+          data-confirm="确认删除「${game.displayName}」及其名下全部数据？不可恢复。"
+        >
+          <div class="form-grid">
+            <div class="field">
+              <label>输入 slug <code>${game.slug}</code> 以确认</label>
+              <input type="text" name="confirmSlug" required autocomplete="off" spellcheck="false">
+              <span class="hint">这一步是刻意的：删除没有撤销入口。</span>
+            </div>
+          </div>
+          <div class="form-actions" style="margin-top:16px;padding-top:14px">
+            <button class="btn danger" type="submit">删除游戏及其全部数据</button>
+          </div>
+        </form>
       </div>
     </div>
   `;
@@ -558,6 +588,7 @@ function renderTargetChecks(status: TargetStatus): Html {
 export async function targetDetailPage(
   deps: GameDetailDeps,
   target: Target,
+  flash: { message?: string } = {},
 ): Promise<Html> {
   const { db } = deps;
   let game: Game | undefined;
@@ -567,7 +598,7 @@ export async function targetDetailPage(
     game = undefined;
   }
 
-  const credentials = listCredentials(db, deps.masterKey, { includeArchived: true });
+  const credentials = listCredentials(db, deps.masterKey);
   const credential = credentials.find((c) => c.id === target.credentialId) ?? null;
   const releases = listReleases(db, { targetId: target.id, limit: 12 });
 
@@ -581,12 +612,10 @@ export async function targetDetailPage(
 
   let targetStatus: TargetStatus | undefined;
   let targetError: string | undefined;
-  if (target.archivedAt === null) {
-    try {
-      targetStatus = await checkTarget(deps, target.id);
-    } catch (error) {
-      targetError = error instanceof Error ? error.message : String(error);
-    }
+  try {
+    targetStatus = await checkTarget(deps, target.id);
+  } catch (error) {
+    targetError = error instanceof Error ? error.message : String(error);
   }
 
   const kind = findTargetKind(target.kind);
@@ -609,24 +638,19 @@ export async function targetDetailPage(
 
   return html`
     ${pageHeader({
-      title: html`${target.name}
-        ${target.archivedAt === null ? html`` : html`<span class="badge muted">已归档</span>`}`,
+      title: html`${target.name}`,
       lead: html`${target.kindDisplayName} · ${game === undefined
         ? '游戏已不存在'
         : html`<a href="/games/${game.slug}">${game.displayName}</a>`}`,
       actions: html`
-        ${target.archivedAt === null
-          ? html`<form method="post" action="/targets/${target.id}/archive">
-              <button class="btn secondary" type="submit">归档目标</button>
-            </form>`
-          : html`<form method="post" action="/targets/${target.id}/unarchive">
-              <button class="btn secondary" type="submit">取消归档</button>
-            </form>`}
         ${game === undefined
           ? html``
           : html`<a class="btn" href="/games/${game.slug}">返回游戏</a>`}
       `,
     })}
+    ${flash.message === undefined
+      ? html``
+      : html`<div class="notice ok">${flash.message}</div>`}
 
     ${sectionTitle('配置')}
     <div class="panel">
@@ -671,13 +695,11 @@ export async function targetDetailPage(
         ? html``
         : renderKindChecks(kindStatus)
       : html`<div class="notice err">类型级检查未能执行：${kindError}</div>`}
-    ${target.archivedAt !== null
-      ? html`<div class="notice">目标已归档，实例级检查不再执行。</div>`
-      : targetError === undefined
-        ? targetStatus === undefined
-          ? html``
-          : renderTargetChecks(targetStatus)
-        : html`<div class="notice err">实例级检查未能执行：${targetError}</div>`}
+    ${targetError === undefined
+      ? targetStatus === undefined
+        ? html``
+        : renderTargetChecks(targetStatus)
+      : html`<div class="notice err">实例级检查未能执行：${targetError}</div>`}
 
     ${sectionTitle('最近发布')}
     ${releases.length === 0
@@ -695,5 +717,39 @@ export async function targetDetailPage(
             </div>
           </div>
         `}
+
+    ${sectionTitle('删除这个目标')}
+    <div class="panel">
+      <div class="panel-body">
+        ${target.releaseCount === 0
+          ? html`
+              <p class="subtle" style="margin:0 0 12px">没有发布记录引用它，可以直接删除。</p>
+              <form
+                method="post"
+                action="/targets/${target.id}/delete"
+                data-confirm="删除发布目标「${target.name}」？不可恢复。"
+              >
+                <button class="btn danger" type="submit">删除目标</button>
+              </form>
+            `
+          : html`
+              <p style="margin:0 0 12px">
+                有 <strong>${String(target.releaseCount)} 条发布记录</strong>引用它，所以不能直接删。
+                <span class="subtle"
+                  >发布历史是「线上曾经是什么版本」的唯一记录，不该被删目标的动作顺手带走。</span
+                >
+              </p>
+              <form
+                method="post"
+                action="/targets/${target.id}/releases/purge"
+                data-confirm="清除「${target.name}」名下已结束的发布记录？不可恢复。正在执行的会保留。"
+              >
+                <button class="btn danger" type="submit">
+                  先清除已结束的发布记录（${String(target.releaseCount)} 条中已结束的部分）
+                </button>
+              </form>
+            `}
+      </div>
+    </div>
   `;
 }

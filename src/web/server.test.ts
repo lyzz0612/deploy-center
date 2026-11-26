@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { after, before, describe, it } from 'node:test';
 
@@ -43,6 +44,10 @@ after(async () => {
 function resetPassword(password: string): void {
   db.prepare('UPDATE settings SET password_hash = NULL WHERE id = 1').run();
   setPassword(db, password, undefined);
+}
+
+function now(): string {
+  return new Date().toISOString();
 }
 
 describe('公开端点', () => {
@@ -195,6 +200,55 @@ describe('设置页：CI key', () => {
       headers: { authorization: `Bearer ${oldValue}` },
     });
     assert.equal(rejected.status, 401, '换值后旧 key 必须立即失效');
+  });
+});
+
+describe('删除被引用的记录：页面与接口同一个状态码', () => {
+  async function adminCookie(): Promise<string> {
+    const password = 'delete-status-password';
+    resetPassword(password);
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password }),
+    });
+    return login.headers.get('set-cookie')!.split(';')[0]!;
+  }
+
+  it('被引用的凭据删除回 409 而不是 400', async () => {
+    const cookie = await adminCookie();
+
+    // 造一条被目标引用的凭据
+    const credId = randomUUID();
+    db.prepare(
+      `INSERT INTO credentials (id, name, type, secrets, created_at, updated_at)
+       VALUES (?, ?, 'file', ?, ?, ?)`,
+    ).run(credId, `ref-cred-${credId.slice(0, 8)}`, Buffer.from('x'), now(), now());
+
+    const gameId = randomUUID();
+    db.prepare('INSERT INTO games (id, slug, display_name, created_at) VALUES (?, ?, ?, ?)').run(
+      gameId,
+      `g-${credId.slice(0, 8)}`,
+      'G',
+      now(),
+    );
+    db.prepare(
+      `INSERT INTO targets (id, game_id, kind, name, credential_id, location, location_key, created_at, updated_at)
+       VALUES (?, ?, 'wechat', 'T', ?, '{}', ?, ?, ?)`,
+    ).run(randomUUID(), gameId, credId, credId, now(), now());
+
+    const res = await fetch(`${base}/settings/credentials/${credId}/delete`, {
+      method: 'POST',
+      headers: { cookie },
+      redirect: 'manual',
+    });
+
+    // 409 而不是 400：请求本身合法，是与当前状态冲突。
+    // 这里曾经回 400——UI 的错误映射漏了 ReferencedError。
+    assert.equal(res.status, 409);
+    const body = await res.text();
+    assert.match(body, /不能删除/);
+    assert.doesNotMatch(body, /归档/, '归档已移除，提示里不该再出现');
   });
 });
 

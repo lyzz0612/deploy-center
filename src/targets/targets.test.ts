@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
 
 import { createGame } from '../catalog/index.js';
-import { createCredential } from '../credentials/index.js';
+import { createCredential, deleteCredential } from '../credentials/index.js';
 import { ensureSchema, open, ReferencedError, type Db } from '../db/index.js';
 import { randomUUID } from 'node:crypto';
 import {
@@ -14,13 +14,11 @@ import {
 } from '../registry/index.js';
 import { ConflictError, NotFoundError } from '../shared/errors.js';
 import {
-  archiveTarget,
   createTarget,
   deleteTarget,
   getTarget,
   listTargets,
   requirePublishableTarget,
-  unarchiveTarget,
   updateTarget,
 } from './store.js';
 
@@ -238,14 +236,12 @@ describe('凭据引用校验', () => {
     }
   });
 
-  it('已归档的凭据不能用于新目标', () => {
+  it('已删除的凭据不能用于新目标', () => {
     const { db, gameId } = setup([makeKind('wechat', { requiresCredential: 'file' })]);
     try {
       const cred = createCredential(db, { name: 'c', type: 'file', secrets: { content: 'k' } }, KEY);
-      db.prepare('UPDATE credentials SET archived_at = ? WHERE id = ?').run(
-        new Date().toISOString(),
-        cred.id,
-      );
+      deleteCredential(db, cred.id);
+      // 凭据没有停用态：删掉就是不存在，错误该说「不存在」而不是「已归档」
       assert.throws(
         () =>
           createTarget(
@@ -253,7 +249,7 @@ describe('凭据引用校验', () => {
             { gameId, kind: 'wechat', name: 'x', credentialId: cred.id, location: { appid: 'wx' } },
             KEY,
           ),
-        /已归档/,
+        /不存在/,
       );
     } finally {
       db.close();
@@ -410,7 +406,7 @@ describe('包类型兼容性', () => {
     }
   });
 
-  it('已归档的目标不能用于新发布', () => {
+  it('已删除的目标不能用于新发布', () => {
     const { db, gameId } = setup();
     try {
       const target = createTarget(
@@ -418,8 +414,9 @@ describe('包类型兼容性', () => {
         { gameId, kind: 'wechat', name: '微信号', location: { appid: 'wx' } },
         KEY,
       );
-      archiveTarget(db, target.id);
-      assert.throws(() => requirePublishableTarget(db, target.id, 'wechat'), /已归档/);
+      deleteTarget(db, target.id);
+      // 没有「已停用但还在」这个状态了：删掉就是不存在
+      assert.throws(() => requirePublishableTarget(db, target.id, 'wechat'), NotFoundError);
     } finally {
       db.close();
     }
@@ -474,8 +471,8 @@ describe('更新目标', () => {
   });
 });
 
-describe('归档与删除', () => {
-  it('归档后从候选列表移除，历史记录仍可读', () => {
+describe('删除', () => {
+  it('删除后从候选列表消失，库里也不留记录', () => {
     const { db, gameId } = setup();
     try {
       const target = createTarget(
@@ -483,28 +480,12 @@ describe('归档与删除', () => {
         { gameId, kind: 'wechat', name: '微信号', location: { appid: 'wx' } },
         KEY,
       );
-      archiveTarget(db, target.id);
-
-      assert.equal(listTargets(db, { gameId }).length, 0, '归档后不在候选里');
-      assert.equal(listTargets(db, { gameId, includeArchived: true }).length, 1);
-      assert.equal(getTarget(db, target.id).name, '微信号', '历史仍可读');
-      assert.notEqual(getTarget(db, target.id).archivedAt, null);
-    } finally {
-      db.close();
-    }
-  });
-
-  it('可以取消归档', () => {
-    const { db, gameId } = setup();
-    try {
-      const target = createTarget(
-        db,
-        { gameId, kind: 'wechat', name: 'x', location: { appid: 'wx' } },
-        KEY,
-      );
-      archiveTarget(db, target.id);
-      unarchiveTarget(db, target.id);
       assert.equal(listTargets(db, { gameId }).length, 1);
+
+      deleteTarget(db, target.id);
+
+      assert.equal(listTargets(db, { gameId }).length, 0);
+      assert.throws(() => getTarget(db, target.id), NotFoundError, '不是软删除');
     } finally {
       db.close();
     }
@@ -550,7 +531,7 @@ describe('归档与删除', () => {
         KEY,
       );
       deleteTarget(db, target.id);
-      assert.equal(listTargets(db, { includeArchived: true }).length, 0);
+      assert.equal(listTargets(db).length, 0);
     } finally {
       db.close();
     }

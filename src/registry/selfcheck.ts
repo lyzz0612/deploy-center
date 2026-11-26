@@ -162,13 +162,13 @@ function checkFieldDeclarations(fields: readonly Field[], where: string): SelfCh
  * 校验库里已有的目标实例仍能被当前代码理解。
  *
  * 典型场景：删掉或改名了一个插件，而库里还有引用它的实例。这不该让进程
- * 起不来（数据不是配置错误，且可能需要先登录后台归档它们），所以只报告。
+ * 起不来（数据不是配置错误，且可能需要先登录后台删掉它们），所以只报告。
  */
 export function checkStoredTargets(db: Db): SelfCheckProblem[] {
   const problems: SelfCheckProblem[] = [];
   const rows = db
     .prepare<[], { id: string; kind: string; name: string; location: string }>(
-      'SELECT id, kind, name, location FROM targets WHERE archived_at IS NULL',
+      'SELECT id, kind, name, location FROM targets',
     )
     .all();
 
@@ -177,7 +177,7 @@ export function checkStoredTargets(db: Db): SelfCheckProblem[] {
     if (kind === undefined) {
       problems.push({
         where: `target:${row.id}`,
-        message: `实例「${row.name}」的类型 ${row.kind} 未注册，归档它或恢复该插件`,
+        message: `实例「${row.name}」的类型 ${row.kind} 未注册，删掉它或恢复该插件`,
       });
       continue;
     }
@@ -221,10 +221,12 @@ export function runSelfCheck(
 }
 
 /**
- * 受保护的表必须有 `archived_at` 列。
+ * 受保护的表必须真的存在，且不能还留着归档位。
  *
- * 少了它，「只能归档不能删除」就成了「既不能归档也不能删除」，而这个
- * 失败只会在用户点归档时才暴露。
+ * 检查 `archived_at` **不存在**，是上一版判据的反面：v6 起删除就是真删除，
+ * 没有归档这个中间态。若某张表还带着这一列，说明迁移没跑完（或者有人把
+ * 它加回来了），而列表查询多半还在用 `archived_at IS NULL` 过滤——那会让
+ * 记录在界面上凭空消失。
  */
 function checkProtectedTables(db: Db): SelfCheckProblem[] {
   const problems: SelfCheckProblem[] = [];
@@ -233,10 +235,14 @@ function checkProtectedTables(db: Db): SelfCheckProblem[] {
   );
   for (const table of protectedTables()) {
     const columns = query.all(table);
-    if (!columns.some((c) => c.name === 'archived_at')) {
+    if (columns.length === 0) {
+      problems.push({ where: `table:${table}`, message: '受引用保护的表不存在' });
+      continue;
+    }
+    if (columns.some((c) => c.name === 'archived_at')) {
       problems.push({
         where: `table:${table}`,
-        message: '受引用保护的表缺少 archived_at 列，无法归档',
+        message: '表里仍有 archived_at 列，但 v6 起已不使用归档；迁移可能没跑完',
       });
     }
   }

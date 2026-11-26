@@ -9,14 +9,23 @@ import { after, afterEach, before, describe, it } from 'node:test';
 
 import { createGame, createPackageType } from '../catalog/index.js';
 import { createCredential } from '../credentials/index.js';
-import { ensureSchema, open, type Db } from '../db/index.js';
+import { ensureSchema, open, ReferencedError, type Db } from '../db/index.js';
 import { enqueue, startRunner, type JobContext, type JobHandler } from '../jobs/index.js';
 import { createEchoPlugin, freshObservation, type EchoObservation, type EchoOptions } from '../plugins/echo/index.js';
 import { registerTargetKind, resetTargetKinds } from '../registry/index.js';
-import { createTarget } from '../targets/index.js';
+import { createTarget, deleteTarget } from '../targets/index.js';
 import { createContext } from './context.js';
 import { executeRelease } from './execute.js';
-import { createRelease, getRelease, listStageAttempts, prepareRetry } from './store.js';
+import {
+  createRelease,
+  deleteRelease,
+  deleteReleasesByTarget,
+  getRelease,
+  listReleases,
+  listStageAttempts,
+  prepareRetry,
+  setReleaseStatus,
+} from './store.js';
 import { buildZip, sha256 } from '../artifacts/zip-fixture.test-helper.js';
 
 const KEY = 'test-master-key-of-enough-length';
@@ -628,3 +637,148 @@ describe('发布记录', () => {
     }
   });
 });
+
+describe('发布记录：删除', () => {
+  interface Scene {
+    readonly db: Db;
+    readonly targetId: string;
+    readonly buildPk: string;
+  }
+
+  function setup(): Scene {
+    const db = open({ file: ':memory:' });
+    ensureSchema(db);
+    const game = createGame(db, { slug: 'demo', displayName: '示例' });
+    createPackageType(db, { id: 'p', displayName: 'P' });
+    registerTargetKind(createEchoPlugin(freshObservation()));
+    const target = createTarget(
+      db,
+      { gameId: game.id, kind: 'echo', name: 'T', location: { slot: 'a' } },
+      KEY,
+    );
+    const buildPk = randomUUID();
+    db.prepare(
+      `INSERT INTO builds (id, game_id, package_type_id, build_id, artifact_url, size_bytes, sha256, reported_at)
+       VALUES (?, ?, 'p', 'b1', 'https://x/a.zip', 1, 'h', ?)`,
+    ).run(buildPk, game.id, new Date().toISOString());
+    return { db, targetId: target.id, buildPk };
+  }
+
+  /** 建一条发布记录并推到指定状态。 */
+  function makeRelease(s: Scene, status: 'queued' | 'running' | 'success' | 'failed'): string {
+    const release = createRelease(s.db, {
+      buildId: s.buildPk,
+      targetId: s.targetId,
+      params: {},
+      stageIds: ['upload'],
+    });
+    if (status === 'queued') return release.id;
+    setReleaseStatus(s.db, release.id, 'running');
+    if (status === 'running') return release.id;
+    setReleaseStatus(s.db, release.id, status);
+    return release.id;
+  }
+
+  function stageCount(db: Db, releaseId: string): number {
+    return (
+      db
+        .prepare<[string], { n: number }>(
+          'SELECT COUNT(*) AS n FROM release_stages WHERE release_id = ?',
+        )
+        .get(releaseId)?.n ?? 0
+    );
+  }
+
+  it('删除已结束的记录，阶段日志一并消失', () => {
+    const s = setup();
+    try {
+      const id = makeRelease(s, 'success');
+      assert.equal(stageCount(s.db, id), 1);
+
+      deleteRelease(s.db, id);
+
+      assert.equal(listReleases(s.db).length, 0);
+      assert.equal(stageCount(s.db, id), 0, '阶段不能留成孤儿');
+    } finally {
+      s.db.close();
+    }
+  });
+
+  it('正在执行或排队中的不能删——执行器还会写回它', () => {
+    const s = setup();
+    try {
+      const running = makeRelease(s, 'running');
+      assert.throws(() => deleteRelease(s.db, running), /不能删除/);
+
+      const queued = makeRelease(s, 'queued');
+      assert.throws(() => deleteRelease(s.db, queued), /不能删除/);
+
+      assert.equal(listReleases(s.db).length, 2, '拒绝删除时不该动数据');
+    } finally {
+      s.db.close();
+    }
+  });
+
+  it('删掉最后一条引用后，目标就变成可删', () => {
+    const s = setup();
+    try {
+      const id = makeRelease(s, 'failed');
+      assert.equal(getTargetReleaseCount(s.db, s.targetId), 1);
+
+      deleteRelease(s.db, id);
+
+      assert.equal(getTargetReleaseCount(s.db, s.targetId), 0);
+      assert.doesNotThrow(() => deleteTarget(s.db, s.targetId));
+    } finally {
+      s.db.close();
+    }
+  });
+
+  it('按目标批量清理只删已结束的，正在跑的留下', () => {
+    const s = setup();
+    try {
+      makeRelease(s, 'success');
+      makeRelease(s, 'failed');
+      const running = makeRelease(s, 'running');
+
+      const removed = deleteReleasesByTarget(s.db, s.targetId);
+      assert.equal(removed, 2);
+
+      const left = listReleases(s.db);
+      assert.deepEqual(
+        left.map((r) => r.id),
+        [running],
+      );
+      // 还有一条在跑，所以目标仍然删不掉
+      assert.throws(() => deleteTarget(s.db, s.targetId), ReferencedError);
+    } finally {
+      s.db.close();
+    }
+  });
+
+  it('没有可清的记录时返回 0，不报错', () => {
+    const s = setup();
+    try {
+      assert.equal(deleteReleasesByTarget(s.db, s.targetId), 0);
+    } finally {
+      s.db.close();
+    }
+  });
+
+  it('删不存在的记录报错而不是静默成功', () => {
+    const s = setup();
+    try {
+      assert.throws(() => deleteRelease(s.db, randomUUID()), /不存在/);
+    } finally {
+      s.db.close();
+    }
+  });
+});
+
+function getTargetReleaseCount(db: Db, targetId: string): number {
+  return (
+    db
+      .prepare<[string], { n: number }>('SELECT COUNT(*) AS n FROM releases WHERE target_id = ?')
+      .get(targetId)?.n ?? 0
+  );
+}

@@ -286,18 +286,13 @@ export async function cliPage(
 /* --------------------------------- 凭据 --------------------------------- */
 
 export function credentialsPage(db: Db, masterKey: string): Html {
-  const credentials = listCredentials(db, masterKey, { includeArchived: true });
+  const credentials = listCredentials(db, masterKey);
 
   const rows = credentials.map(
     (credential) => html`
       <tr>
         <td>
-          <div class="cell-title">
-            ${credential.name}
-            ${credential.archivedAt === null
-              ? html``
-              : html`<span class="badge muted">已归档</span>`}
-          </div>
+          <div class="cell-title">${credential.name}</div>
           <div class="cell-sub">更新于 ${shortTime(credential.updatedAt)}</div>
         </td>
         <td>${credential.typeDisplayName}</td>
@@ -311,13 +306,19 @@ export function credentialsPage(db: Db, masterKey: string): Html {
         <td class="num">${credential.referenceCount}</td>
         <td>
           <div class="row-actions">
-            ${credential.archivedAt === null
+            ${credential.referenceCount === 0
               ? html`
-                  <form method="post" action="/settings/credentials/${credential.id}/archive">
-                    <button class="btn secondary small" type="submit">归档</button>
+                  <form
+                    method="post"
+                    action="/settings/credentials/${credential.id}/delete"
+                    data-confirm="删除凭据「${credential.name}」？不可恢复。"
+                  >
+                    <button class="btn danger small" type="submit">删除</button>
                   </form>
                 `
-              : html`<span class="badge muted">已归档</span>`}
+              : html`<span class="subtle small"
+                  >被 ${String(credential.referenceCount)} 个目标引用，不能删除</span
+                >`}
           </div>
         </td>
       </tr>
@@ -328,7 +329,7 @@ export function credentialsPage(db: Db, masterKey: string): Html {
     ${pageHeader({
       title: '凭据',
       lead: html`加密存储，任何页面都不回显值，只显示哪些字段已设置。
-        发布目标只引用凭据，所以轮换只改这一处。`,
+        发布目标只引用凭据，所以轮换只改这一处；没有目标引用的可以直接删除。`,
       actions: html`<a class="btn" href="/settings/credentials/new">新建凭据</a>`,
     })}
     ${credentials.length === 0
@@ -442,7 +443,7 @@ export function newCredentialPage(typeId?: string): Html {
 /* -------------------------------- 包类型 -------------------------------- */
 
 export function packageTypesPage(db: Db): Html {
-  const types = listPackageTypes(db, { includeArchived: true });
+  const types = listPackageTypes(db);
 
   const rows = types.map(
     (type) => html`
@@ -456,9 +457,21 @@ export function packageTypesPage(db: Db): Html {
         </td>
         <td class="num">${type.buildCount}</td>
         <td>
-          ${type.archivedAt === null
-            ? html``
-            : html`<span class="badge muted">已归档</span>`}
+          <div class="row-actions">
+            ${type.buildCount === 0
+              ? html`
+                  <form
+                    method="post"
+                    action="/settings/package-types/${type.id}/delete"
+                    data-confirm="删除包类型「${type.id}」？插件声明的类型下次启动会自动补回。"
+                  >
+                    <button class="btn danger small" type="submit">删除</button>
+                  </form>
+                `
+              : html`<span class="subtle small"
+                  >有 ${String(type.buildCount)} 条构建引用，不能删除</span
+                >`}
+          </div>
         </td>
       </tr>
     `,
@@ -467,7 +480,8 @@ export function packageTypesPage(db: Db): Html {
   return html`
     ${pageHeader({
       title: '包类型',
-      lead: html`纯数据，新增不用改代码。但要能发布，需要有发布目标类型声明接受它。`,
+      lead: html`纯数据，新增不用改代码。但要能发布，需要有发布目标类型声明接受它。
+        没有构建引用的可以直接删除——插件声明的类型（h5、wechat）删掉后下次启动会补回。`,
       actions: html`<a class="btn" href="/settings/package-types/new">新增包类型</a>`,
     })}
     ${types.length === 0

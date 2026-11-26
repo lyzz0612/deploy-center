@@ -21,7 +21,6 @@ interface GameRow {
   readonly slug: string;
   readonly display_name: string;
   readonly created_at: string;
-  readonly archived_at: string | null;
 }
 
 export interface Game {
@@ -29,7 +28,6 @@ export interface Game {
   readonly slug: string;
   readonly displayName: string;
   readonly createdAt: string;
-  readonly archivedAt: string | null;
 }
 
 function toGame(row: GameRow): Game {
@@ -38,7 +36,6 @@ function toGame(row: GameRow): Game {
     slug: row.slug,
     displayName: row.display_name,
     createdAt: row.created_at,
-    archivedAt: row.archived_at,
   };
 }
 
@@ -88,14 +85,9 @@ export function findGameBySlug(db: Db, slug: string): Game | undefined {
   return row === undefined ? undefined : toGame(row);
 }
 
-export interface ListGamesOptions {
-  readonly includeArchived?: boolean;
-}
-
-export function listGames(db: Db, options: ListGamesOptions = {}): Game[] {
-  const where = options.includeArchived === true ? '' : 'WHERE archived_at IS NULL';
+export function listGames(db: Db): Game[] {
   return db
-    .prepare<[], GameRow>(`SELECT * FROM games ${where} ORDER BY display_name`)
+    .prepare<[], GameRow>('SELECT * FROM games ORDER BY display_name')
     .all()
     .map(toGame);
 }
@@ -112,45 +104,84 @@ export function renameGame(db: Db, id: string, displayName: string): Game {
   return getGame(db, id);
 }
 
-/**
- * 归档游戏：不再接受新的构建上报与发布，历史记录保持可读。
- *
- * 游戏不走 db/references.ts 的引用保护：那套机制管的是「删除」，而游戏
- * 没有删除入口——它底下挂着构建、目标与发布历史，归档是唯一合理的终态。
- */
-export function archiveGame(db: Db, id: string): Game {
-  const result = db
-    .prepare('UPDATE games SET archived_at = ? WHERE id = ? AND archived_at IS NULL')
-    .run(now(), id);
-  if (result.changes === 0) {
-    throw new Error(`游戏 ${id} 不存在或已归档`);
-  }
-  return getGame(db, id);
+/** 删游戏会连带删掉什么。界面在确认前要把这些数字摆给用户看。 */
+export interface GameDeletionImpact {
+  readonly builds: number;
+  readonly targets: number;
+  readonly releases: number;
 }
 
-export function unarchiveGame(db: Db, id: string): Game {
-  const result = db
-    .prepare('UPDATE games SET archived_at = NULL WHERE id = ? AND archived_at IS NOT NULL')
-    .run(id);
-  if (result.changes === 0) {
-    throw new Error(`游戏 ${id} 不存在或未归档`);
-  }
-  return getGame(db, id);
+/** 数一遍这个游戏名下的从属数据。只读，不改任何东西。 */
+export function countGameDependents(db: Db, id: string): GameDeletionImpact {
+  const one = (sql: string): number =>
+    db.prepare<[string], { n: number }>(sql).get(id)?.n ?? 0;
+
+  const releases =
+    db
+      .prepare<[string, string], { n: number }>(
+        `SELECT COUNT(*) AS n FROM releases
+          WHERE target_id IN (SELECT id FROM targets WHERE game_id = ?)
+             OR build_id  IN (SELECT id FROM builds  WHERE game_id = ?)`,
+      )
+      .get(id, id)?.n ?? 0;
+
+  return {
+    builds: one('SELECT COUNT(*) AS n FROM builds WHERE game_id = ?'),
+    targets: one('SELECT COUNT(*) AS n FROM targets WHERE game_id = ?'),
+    releases,
+  };
+}
+
+/**
+ * 删除游戏，连带删掉它名下的全部数据。
+ *
+ * 游戏是唯一走级联的实体：它底下挂着构建、目标与发布历史，而「有引用就
+ * 拒绝」会让任何用过一次的游戏永远删不掉。所以这里是真的连带删除，
+ * **不可恢复**——调用方必须先用 `countGameDependents` 让用户看清代价。
+ *
+ * 删除顺序是依赖倒序：发布阶段 → 发布记录 → 目标 → 构建 → 游戏。顺序错了
+ * 会撞上外键。整体在一个事务里，中途失败什么都不会变。
+ */
+export function deleteGameCascade(db: Db, id: string): GameDeletionImpact {
+  // 先确认存在，顺手拿到 slug 用于报错信息
+  getGame(db, id);
+  const impact = countGameDependents(db, id);
+
+  db.transaction(() => {
+    // 发布阶段靠 ON DELETE CASCADE 跟着发布记录走，但显式删一遍更稳：
+    // 那条级联依赖 PRAGMA foreign_keys 开着。
+    db.prepare(
+      `DELETE FROM release_stages WHERE release_id IN (
+         SELECT id FROM releases
+          WHERE target_id IN (SELECT id FROM targets WHERE game_id = ?)
+             OR build_id  IN (SELECT id FROM builds  WHERE game_id = ?)
+       )`,
+    ).run(id, id);
+
+    db.prepare(
+      `DELETE FROM releases
+        WHERE target_id IN (SELECT id FROM targets WHERE game_id = ?)
+           OR build_id  IN (SELECT id FROM builds  WHERE game_id = ?)`,
+    ).run(id, id);
+
+    db.prepare('DELETE FROM targets WHERE game_id = ?').run(id);
+    db.prepare('DELETE FROM builds WHERE game_id = ?').run(id);
+    db.prepare('DELETE FROM games WHERE id = ?').run(id);
+  })();
+
+  return impact;
 }
 
 /**
  * 取一个可接受上报的游戏，否则报错。
  *
- * 上报与发布都要先过这一关：归档的游戏不该再进新数据，而「游戏不存在」
- * 与「游戏已归档」对 CI 来说是两种不同的处置，错误信息要能区分。
+ * 上报与发布都要先过这一关。现在只有「不存在」一种失败：游戏没有停用态，
+ * 不想要了就删掉。
  */
 export function requireActiveGame(db: Db, slug: string): Game {
   const game = findGameBySlug(db, slug);
   if (game === undefined) {
     throw new Error(`游戏「${slug}」未登记`);
-  }
-  if (game.archivedAt !== null) {
-    throw new Error(`游戏「${slug}」已归档，不再接受新的构建上报`);
   }
   return game;
 }

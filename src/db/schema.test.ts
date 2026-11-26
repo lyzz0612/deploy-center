@@ -274,6 +274,129 @@ describe('结构升级', () => {
     }
   });
 
+  it('v5 → v6：去掉归档位，无引用的已归档记录删掉、有引用的恢复正常', () => {
+    const db = open({ file: ':memory:' });
+    try {
+      // 造一个 v5 的库：四张表都带 archived_at
+      db.exec(
+        `CREATE TABLE package_types (
+           id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
+           created_at TEXT NOT NULL, archived_at TEXT
+         );
+         CREATE TABLE credentials (
+           id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, type TEXT NOT NULL,
+           secrets BLOB NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+           archived_at TEXT
+         );
+         CREATE TABLE games (
+           id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE,
+           display_name TEXT NOT NULL, created_at TEXT NOT NULL, archived_at TEXT
+         );
+         CREATE TABLE targets (
+           id TEXT PRIMARY KEY, game_id TEXT NOT NULL REFERENCES games(id),
+           kind TEXT NOT NULL, name TEXT NOT NULL,
+           credential_id TEXT REFERENCES credentials(id),
+           location TEXT NOT NULL, location_key TEXT NOT NULL,
+           created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archived_at TEXT
+         );
+         CREATE TABLE builds (
+           id TEXT PRIMARY KEY, game_id TEXT NOT NULL REFERENCES games(id),
+           package_type_id TEXT NOT NULL REFERENCES package_types(id),
+           build_id TEXT NOT NULL, artifact_url TEXT NOT NULL,
+           size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, commit_sha TEXT,
+           description TEXT, reported_at TEXT NOT NULL, ci_key_id TEXT
+         );
+         CREATE TABLE releases (
+           id TEXT PRIMARY KEY, build_id TEXT NOT NULL REFERENCES builds(id),
+           target_id TEXT NOT NULL REFERENCES targets(id), params TEXT NOT NULL,
+           status TEXT NOT NULL, created_by TEXT NOT NULL DEFAULT 'owner',
+           created_at TEXT NOT NULL, finished_at TEXT
+         )`,
+      );
+
+      // 游戏：g-used 有构建（归档→应恢复）、g-free 什么都没有（归档→应删）
+      const insertGame = db.prepare('INSERT INTO games VALUES (?,?,?,?,?)');
+      insertGame.run('g-used', 'used', '在用', now(), now());
+      insertGame.run('g-free', 'free', '空的', now(), now());
+      insertGame.run('g-active', 'active', '未归档', now(), null);
+
+      // 包类型：t-used 有构建（归档→恢复）、t-free 没有（归档→删）
+      const insertType = db.prepare('INSERT INTO package_types VALUES (?,?,?,?)');
+      insertType.run('t-used', '在用', now(), now());
+      insertType.run('t-free', '没人用', now(), now());
+
+      // 凭据：c-used 被目标引用（归档→恢复）、c-free 没有（归档→删）
+      const insertCred = db.prepare('INSERT INTO credentials VALUES (?,?,?,?,?,?,?)');
+      insertCred.run('c-used', 'used', 'file', Buffer.from('x'), now(), now(), now());
+      insertCred.run('c-free', 'free', 'file', Buffer.from('x'), now(), now(), now());
+
+      // 目标：tg-used 有发布记录（归档→恢复）、tg-free 没有（归档→删）
+      const insertTarget = db.prepare('INSERT INTO targets VALUES (?,?,?,?,?,?,?,?,?,?)');
+      insertTarget.run(
+        'tg-used', 'g-used', 'wechat', '在用', 'c-used', '{}', '{}', now(), now(), now(),
+      );
+      insertTarget.run(
+        'tg-free', 'g-used', 'wechat', '没发过', 'c-free', '{"a":1}', '{"a":1}', now(), now(), now(),
+      );
+
+      db.prepare(
+        `INSERT INTO builds (id, game_id, package_type_id, build_id, artifact_url,
+                             size_bytes, sha256, reported_at)
+         VALUES ('b1', 'g-used', 't-used', 'r1', 'https://x/a.zip', 1, 'h', ?)`,
+      ).run(now());
+      db.prepare(
+        `INSERT INTO releases (id, build_id, target_id, params, status, created_at)
+         VALUES ('rel1', 'b1', 'tg-used', '{}', 'success', ?)`,
+      ).run(now());
+
+      db.pragma('user_version = 5');
+
+      const result = ensureSchema(db);
+      assert.equal(result.previousVersion, 5);
+      assert.equal(result.version, SCHEMA_VERSION);
+
+      // 四张表都不该再有 archived_at
+      for (const table of ['games', 'targets', 'credentials', 'package_types']) {
+        const columns = db.pragma(`table_info(${table})`) as Array<{ name: string }>;
+        assert.equal(
+          columns.some((c) => c.name === 'archived_at'),
+          false,
+          `${table} 升级后不该还有 archived_at`,
+        );
+      }
+
+      const ids = (sql: string): string[] =>
+        db.prepare<[], { id: string }>(sql).all().map((r) => r.id);
+
+      assert.deepEqual(
+        ids('SELECT id FROM games ORDER BY id'),
+        ['g-active', 'g-used'],
+        '空的已归档游戏删掉，有构建的恢复，未归档的不动',
+      );
+      assert.deepEqual(
+        ids('SELECT id FROM package_types ORDER BY id'),
+        ['t-used'],
+        '没有构建引用的已归档包类型应删掉',
+      );
+      assert.deepEqual(
+        ids('SELECT id FROM credentials ORDER BY id'),
+        ['c-used'],
+        '没有目标引用的已归档凭据应删掉',
+      );
+      assert.deepEqual(
+        ids('SELECT id FROM targets ORDER BY id'),
+        ['tg-used'],
+        '没有发布记录的已归档目标应删掉',
+      );
+
+      // 有引用的那些数据本身不该丢
+      assert.equal(ids('SELECT id FROM builds').length, 1);
+      assert.equal(ids('SELECT id FROM releases').length, 1);
+    } finally {
+      db.close();
+    }
+  });
+
   it('版本高于本程序时拒绝打开', () => {
     const db = open({ file: ':memory:' });
     try {

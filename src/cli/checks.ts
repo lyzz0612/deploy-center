@@ -174,10 +174,6 @@ export async function preflight(deps: CheckTargetDeps, targetId: string): Promis
   const target = getTarget(deps.db, targetId);
   const blockers: string[] = [];
 
-  if (target.archivedAt !== null) {
-    blockers.push(`目标「${target.name}」已归档`);
-  }
-
   const kindStatus = await checkKind(deps.cliHome, target.kind);
   for (const cli of kindStatus.clis) {
     if (!cli.install.ok) blockers.push(cli.install.message);

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { createGame, createPackageType } from '../catalog/index.js';
+import { createGame, createPackageType, deletePackageType } from '../catalog/index.js';
 import { ensureSchema, open, type Db } from '../db/index.js';
 import { parseBuildReport, resolveReport } from './ingest.js';
 
@@ -147,16 +147,15 @@ describe('上报目标解析', () => {
     }
   });
 
-  it('归档的包类型被拒', () => {
+  it('删掉的包类型被拒（没有归档这个中间态）', () => {
     const db = freshDb();
     try {
       createGame(db, { slug: 'demo', displayName: '示例' });
       createPackageType(db, { id: 'wechat', displayName: '微信' });
-      db.prepare('UPDATE package_types SET archived_at = ? WHERE id = ?').run(
-        new Date().toISOString(),
-        'wechat',
-      );
-      assert.throws(() => resolveReport(db, parseBuildReport(validBody)), /已归档/);
+      assert.doesNotThrow(() => resolveReport(db, parseBuildReport(validBody)));
+
+      deletePackageType(db, 'wechat');
+      assert.throws(() => resolveReport(db, parseBuildReport(validBody)), /未登记/);
     } finally {
       db.close();
     }

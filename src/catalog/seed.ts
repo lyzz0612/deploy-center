@@ -7,7 +7,7 @@
  * 显然不对。
  *
  * 所以启动时把插件声明的包类型补齐，只补不覆盖：用户改过显示名、或把某个
- * 类型归档了，都不该被启动流程推翻。
+ * 类型改过显示名，都不该被启动流程推翻。
  */
 import type { Db } from '../db/index.js';
 import { listTargetKinds } from '../registry/index.js';

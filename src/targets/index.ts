@@ -1,11 +1,9 @@
 export {
-  archiveTarget,
   createTarget,
   deleteTarget,
   getTarget,
   listTargets,
   requirePublishableTarget,
-  unarchiveTarget,
   updateTarget,
   type CreateTargetInput,
   type ListTargetsOptions,

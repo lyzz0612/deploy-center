@@ -5,12 +5,10 @@ export { open, ensureSchema, databaseFile, type Db, type EnsureSchemaResult } fr
 export { SCHEMA_VERSION } from './schema.js';
 export { locationKey } from './location-key.js';
 export {
-  archive,
   deleteIfUnreferenced,
   findReferences,
   protectedTables,
   ReferencedError,
-  unarchive,
   type ReferenceCheck,
   type ReferenceSource,
 } from './references.js';

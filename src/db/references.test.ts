@@ -5,12 +5,10 @@ import { describe, it } from 'node:test';
 import { ensureSchema, open, type Db } from './connection.js';
 import { locationKey } from './location-key.js';
 import {
-  archive,
   deleteIfUnreferenced,
   findReferences,
   protectedTables,
   ReferencedError,
-  unarchive,
 } from './references.js';
 
 function now(): string {
@@ -85,9 +83,10 @@ function seedAll(db: Db, withReleases = true): Fixture {
 }
 
 describe('引用保护清单', () => {
-  it('三处受保护的表都在清单里', () => {
+  it('四处受保护的表都在清单里', () => {
     assert.deepEqual(protectedTables().slice().sort(), [
       'credentials',
+      'games',
       'package_types',
       'targets',
     ]);
@@ -96,12 +95,18 @@ describe('引用保护清单', () => {
   it('清单外的表被拒绝操作，而不是拼出一条 SQL', () => {
     const db = freshDb();
     try {
-      for (const fn of [findReferences, deleteIfUnreferenced, archive, unarchive]) {
-        assert.throws(() => fn(db, 'games', 'x'), /不在引用保护清单里/);
+      for (const fn of [findReferences, deleteIfUnreferenced]) {
+        assert.throws(() => fn(db, 'releases', 'x'), /不在引用保护清单里/);
       }
     } finally {
       db.close();
     }
+  });
+
+  it('没有归档入口了：模块只导出查引用与删除', async () => {
+    const mod = await import('./references.js');
+    assert.equal('archive' in mod, false, '归档已移除，不该还能调用');
+    assert.equal('unarchive' in mod, false);
   });
 });
 
@@ -167,13 +172,18 @@ describe('凭据 ← 目标', () => {
     }
   });
 
-  it('目标归档后凭据仍被引用（归档不等于解除引用）', () => {
+  it('删掉引用它的目标后，凭据就变成可删', () => {
     const db = freshDb();
     try {
-      const f = seedAll(db);
-      archive(db, 'targets', f.targetId);
-      const check = findReferences(db, 'credentials', f.credentialId);
-      assert.equal(check.referenced, true);
+      const f = seedAll(db, false);
+      assert.equal(findReferences(db, 'credentials', f.credentialId).referenced, true);
+
+      deleteIfUnreferenced(db, 'targets', f.targetId);
+      assert.equal(findReferences(db, 'credentials', f.credentialId).referenced, false);
+      deleteIfUnreferenced(db, 'credentials', f.credentialId);
+
+      const row = db.prepare<[], { n: number }>('SELECT COUNT(*) AS n FROM credentials').get();
+      assert.equal(row?.n, 0);
     } finally {
       db.close();
     }
@@ -207,73 +217,18 @@ describe('目标 ← 发布记录', () => {
   });
 });
 
-describe('归档', () => {
-  it('归档后记录仍可读，历史不丢', () => {
+describe('游戏 ← 构建 / 目标', () => {
+  it('能查出游戏被谁引用（级联删除前要展示给用户）', () => {
     const db = freshDb();
     try {
       const f = seedAll(db);
-      archive(db, 'targets', f.targetId);
-
-      const row = db
-        .prepare<[string], { archived_at: string | null; name: string }>(
-          'SELECT archived_at, name FROM targets WHERE id = ?',
-        )
-        .get(f.targetId);
-      assert.ok(row?.archived_at, '应记录归档时间');
-      assert.equal(row.name, '微信正式号');
-
-      // 发布记录仍然指得到它
-      const releases = db
-        .prepare<[string], { n: number }>('SELECT COUNT(*) AS n FROM releases WHERE target_id = ?')
-        .get(f.targetId);
-      assert.equal(releases?.n, 1);
-    } finally {
-      db.close();
-    }
-  });
-
-  it('重复归档报错而不是静默成功', () => {
-    const db = freshDb();
-    try {
-      const f = seedAll(db);
-      archive(db, 'targets', f.targetId);
-      assert.throws(() => archive(db, 'targets', f.targetId), /没有 id .* 的未归档记录/);
-    } finally {
-      db.close();
-    }
-  });
-
-  it('可以取消归档', () => {
-    const db = freshDb();
-    try {
-      const f = seedAll(db);
-      archive(db, 'targets', f.targetId);
-      unarchive(db, 'targets', f.targetId);
-      const row = db
-        .prepare<[string], { archived_at: string | null }>(
-          'SELECT archived_at FROM targets WHERE id = ?',
-        )
-        .get(f.targetId);
-      assert.equal(row?.archived_at, null);
-    } finally {
-      db.close();
-    }
-  });
-
-  it('取消归档一条未归档的记录报错', () => {
-    const db = freshDb();
-    try {
-      const f = seedAll(db);
-      assert.throws(() => unarchive(db, 'targets', f.targetId), /没有 id .* 的已归档记录/);
-    } finally {
-      db.close();
-    }
-  });
-
-  it('归档不存在的记录报错', () => {
-    const db = freshDb();
-    try {
-      assert.throws(() => archive(db, 'targets', 'no-such-id'), /没有 id/);
+      const check = findReferences(db, 'games', f.gameId);
+      assert.equal(check.referenced, true);
+      // 一条构建 + 一个目标
+      assert.equal(check.count, 2);
+      const labels = check.samples.map((s) => s.label).join(' ');
+      assert.match(labels, /构建 b20261124/);
+      assert.match(labels, /目标 微信正式号/);
     } finally {
       db.close();
     }
@@ -285,6 +240,27 @@ describe('删除不存在的记录', () => {
     const db = freshDb();
     try {
       assert.throws(() => deleteIfUnreferenced(db, 'credentials', 'no-such-id'), /没有 id/);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe('错误信息', () => {
+  it('说的是「不能删除」而不是「只能归档」', () => {
+    const db = freshDb();
+    try {
+      const f = seedAll(db);
+      assert.throws(
+        () => deleteIfUnreferenced(db, 'targets', f.targetId),
+        (error: unknown) => {
+          const message = (error as Error).message;
+          assert.ok(error instanceof ReferencedError);
+          assert.match(message, /不能删除/);
+          assert.equal(/归档/.test(message), false, '归档已不存在，不该出现在提示里');
+          return true;
+        },
+      );
     } finally {
       db.close();
     }
