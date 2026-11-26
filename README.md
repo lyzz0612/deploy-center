@@ -92,7 +92,7 @@
 | 失败重试、进程中断恢复 | 已实测 |
 | 平台 CLI 安装与三层探测 | 已实测（两个真实 CLI） |
 | 微信真实上传 | **未验证**，插件集成用 stub CLI 验过 |
-| 镜像构建与发布（CI → GHCR） | 工作流已配置（推 `v*` 标签 / 手动触发），**尚未首次运行** |
+| 镜像构建与发布（CI → GHCR） | 已实测，v0.0.1 / v0.1.1 / v0.1.2 均真实发布成功 |
 | Docker 部署 | **未验证**，本机无 Docker |
 
 <p align="right">(<a href="#readme-top">返回顶部</a>)</p>
@@ -141,7 +141,7 @@ docker compose up -d
 - [x] 微信插件（真实上传待验证）
 - [x] H5 对象存储插件 `h5-r2`（Cloudflare R2 / S3 兼容；真实 R2 待验证）
 - [x] 中控台界面
-- [x] 镜像构建流水线：推 tag 或手动触发 → 冒烟 → GHCR
+- [x] 镜像构建流水线：push 到 `deploy-center` 自动发版（版本号末位 +1 → 冒烟 → GHCR → 回推标签），也可手工打 `v*` 标签
 - [ ] Docker 主机上的端到端部署验证
 
 完整任务与验证方式见 [tasks.md](openspec/changes/add-publish-console/tasks.md)。

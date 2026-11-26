@@ -1,16 +1,37 @@
 name: docker-publish
 
-# 构建中控台镜像并推送到 ghcr.io。
+# 构建中控台镜像并推送到 ghcr.io，同时负责自动发版。
 #
 # 触发方式：
-#   - 推 v* 标签：发布 1.2.3 / 1.2 / latest（预发布标签如 v1.2.3-rc.1 不动 latest）
+#   - push 到 deploy-center：**自动发版**。算出下一个补丁版本 → 构建冒烟 →
+#     推镜像 → 回推 `chore(release)` 提交与 `vX.Y.Z` 标签。
+#     只改 docs / README / openspec 时跳过（见 paths-ignore）。
+#   - 推 v* 标签：手工发版，行为不变（想跳版本号或发预发布版时用）
 #   - 手动触发：发布 <分支名> 与 sha-<短哈希>，可额外指定一个标签；
-#     取消勾选 push_image 则只构建并冒烟、不推送（第一次验证用这个）
+#     取消勾选 push_image 则只构建并冒烟、不推送
 #
-# 先构建到 runner 本地并真起容器冒烟，通过了才登录 ghcr 推送：坏镜像不进仓库。
+# 为什么自动发版和构建在同一个工作流里：用 GITHUB_TOKEN 回推的标签**不会**
+# 触发工作流（Actions 的既有行为，防无限递归）。所以「推标签让另一个工作流
+# 构建」这条链在自动场景下是断的——必须一次把活干完。
+#
+# 顺序是刻意的：**构建冒烟通过、镜像推成功之后**才改版本号打标签。反过来
+# 的话，一次构建失败就白烧掉一个版本号，而且仓库里会留下一个没有对应镜像
+# 的标签。
 on:
   push:
+    branches: ['deploy-center']
     tags: ['v*']
+    # 这些路径进不了镜像（Dockerfile 只 COPY package.json/lock/tsconfig/src），
+    # 改它们不该产生新版本。全部改动都落在这些路径时整个工作流不触发。
+    #
+    # 注意 paths-ignore 对标签推送不生效（GitHub 只对分支 push 做路径过滤），
+    # 所以手工打标签发版永远会跑，不受这份清单影响。
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'openspec/**'
+      - '.gitignore'
+      - '.github/ISSUE_TEMPLATE/**'
   workflow_dispatch:
     inputs:
       extra_tag:
@@ -25,10 +46,12 @@ on:
         type: boolean
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 concurrency:
+  # 同一分支的发版串行执行：并发会让两次 push 算出同一个版本号，
+  # 后打的那个标签必然失败。
   group: docker-publish-${{ github.ref }}
   cancel-in-progress: false
 
@@ -42,8 +65,47 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 要读已有标签来算下一个版本，也要能回推，所以取全历史
+          fetch-depth: 0
 
       - uses: docker/setup-buildx-action@v3
+
+      # 自动发版路径：算出下一个补丁版本。
+      #
+      # 基准取 package.json 与最大的 v* 标签里更大的那个：只看 package.json
+      # 会在有人手工打过标签却忘了改文件时算出一个已占用的版本号。
+      - name: 推导版本号
+        id: version
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
+        run: |
+          set -euo pipefail
+
+          current=$(node -p "require('./package.json').version")
+          echo "package.json: $current"
+
+          latest_tag=$(git tag --list 'v*' | sed 's/^v//' \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -t. -k1,1n -k2,2n -k3,3n | tail -n1 || true)
+          echo "最大标签: ${latest_tag:-（无）}"
+
+          # 取两者较大的作为基准
+          base=$(printf '%s\n%s\n' "$current" "${latest_tag:-0.0.0}" \
+            | sort -t. -k1,1n -k2,2n -k3,3n | tail -n1)
+
+          major=${base%%.*}
+          rest=${base#*.}
+          minor=${rest%%.*}
+          patch=${rest#*.}
+          next="${major}.${minor}.$((patch + 1))"
+
+          if git rev-parse -q --verify "refs/tags/v${next}" >/dev/null; then
+            echo "::error::标签 v${next} 已存在，拒绝覆盖。请手工处理后重跑"
+            exit 1
+          fi
+
+          echo "下一个版本: $next"
+          echo "version=$next" >> "$GITHUB_OUTPUT"
 
       - name: 镜像元数据
         id: meta
@@ -57,9 +119,25 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+            type=raw,value=${{ steps.version.outputs.version }},enable=${{ steps.version.outputs.version != '' }}
+            type=raw,value=latest,enable=${{ steps.version.outputs.version != '' }}
             type=ref,event=branch
             type=sha,prefix=sha-
             type=raw,value=${{ inputs.extra_tag }},enable=${{ inputs.extra_tag != '' }}
+
+      # 自动发版时镜像里要带上将要发布的版本号，否则容器里的 package.json
+      # 还是上一版，查问题时对不上
+      - name: 写入版本号
+        if: steps.version.outputs.version != ''
+        run: |
+          set -euo pipefail
+          node -e "
+            const fs = require('node:fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = process.argv[1];
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          " '${{ steps.version.outputs.version }}'
+          node -p "'package.json 现在是 ' + require('./package.json').version"
 
       # 先只构建到本地做冒烟测试，通过了才推送
       - name: 构建（本地）
@@ -114,3 +192,26 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
+
+      # 镜像已经推成功，现在才把版本号落到仓库并打标签。
+      # 顺序反过来会在构建失败时留下一个没有镜像的标签。
+      - name: 回推版本号与标签
+        if: steps.version.outputs.version != ''
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          git add package.json
+          git commit -m "chore(release): 版本号升到 ${VERSION}" \
+                     -m "由 docker-publish 自动发版，镜像 ${IMAGE}:${VERSION} 已推送。"
+          git tag -a "v${VERSION}" -m "v${VERSION}"
+
+          # 原子推送：提交与标签一起成功或一起失败，不留下只有标签没有提交
+          # 的中间态。被别的 push 抢先时这里会失败，而镜像已经推好了——
+          # 下一次 push 会从更大的基准重新算版本号。
+          git push --atomic origin "HEAD:${GITHUB_REF_NAME}" "refs/tags/v${VERSION}"
+
+          echo "已发布 v${VERSION}" >> "$GITHUB_STEP_SUMMARY"
