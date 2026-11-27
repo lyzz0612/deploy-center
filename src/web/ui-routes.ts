@@ -31,7 +31,7 @@ import {
 import { switchVersion } from '../cli/index.js';
 import { createCredential, deleteCredential } from '../credentials/index.js';
 import type { Db } from '../db/index.js';
-import { enqueue } from '../jobs/index.js';
+import { enqueue, listJobs } from '../jobs/index.js';
 import { getCredentialType, getTargetKind } from '../registry/index.js';
 import {
   createRelease,
@@ -68,6 +68,7 @@ import {
 } from './pages/releases.js';
 import {
   ciKeysPage,
+  cliInstallActive,
   cliPage,
   credentialsPage,
   newCredentialPage,
@@ -146,7 +147,11 @@ function noticeFromQuery(url: URL): SettingsFlash {
       return { message: 'CI key 已删除，之后用它上报会被拒绝。' };
     case 'install-queued':
       return {
-        message: `安装任务已投递${cli === null ? '' : `（${cli}）`}。npm 安装通常要一两分钟，稍后刷新查看结果。`,
+        message: `安装任务已投递${cli === null ? '' : `（${cli}）`}。状态与日志显示在本页的 CLI 卡片里，执行中页面会自动刷新。`,
+      };
+    case 'install-running':
+      return {
+        warn: `${cli ?? '该 CLI'} 已有安装任务在排队或执行，进度在下方 CLI 卡片的任务面板里；结束后可再次发起。`,
       };
     case 'cli-switched':
       return { message: 'CLI 版本已切换。' };
@@ -639,9 +644,12 @@ export async function handleUi(
     if (path === '/settings/cli' && method === 'GET') {
       page(res, {
         title: '平台 CLI',
-        body: await cliPage(deps.config.cliHome, noticeFromQuery(url)),
+        body: await cliPage(deps.db, deps.config.cliHome, noticeFromQuery(url)),
         pathname: path,
         crumbs: [{ label: '设置' }, { label: '平台 CLI' }],
+        // 有安装任务在排队或执行时自动刷新，让任务面板能看到进展
+        // （与发布详情页同款机制）
+        ...(cliInstallActive(deps.db) && { refreshSeconds: 3 }),
       });
       return true;
     }
@@ -750,10 +758,19 @@ export async function handleUi(
 
     const cliInstallMatch = /^\/settings\/cli\/([A-Za-z0-9._-]+)\/install$/.exec(path);
     if (cliInstallMatch !== null && method === 'POST') {
+      const cliId = cliInstallMatch[1]!;
       // 安装是长任务，投递进队列而不是在请求里同步装——npm i 两分钟
       // 是常态，反代通常 60 秒就断了
-      enqueue(deps.db, 'cli_install', cliInstallMatch[1]!);
-      redirect(res, `/settings/cli?notice=install-queued&cli=${encodeURIComponent(cliInstallMatch[1]!)}`);
+      const alreadyActive = listJobs(deps.db, { kind: 'cli_install', refId: cliId }).some(
+        (job) => job.status === 'queued' || job.status === 'running',
+      );
+      if (alreadyActive) {
+        // 同一个 CLI 排两条安装任务没有意义：串行执行器只会把它们挨个跑完
+        redirect(res, `/settings/cli?notice=install-running&cli=${encodeURIComponent(cliId)}`);
+        return true;
+      }
+      enqueue(deps.db, 'cli_install', cliId);
+      redirect(res, `/settings/cli?notice=install-queued&cli=${encodeURIComponent(cliId)}`);
       return true;
     }
 

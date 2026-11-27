@@ -12,6 +12,7 @@
  * 字段就回退了。
  */
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { access, mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
@@ -47,7 +48,7 @@ export interface RunResult {
 }
 
 /**
- * npm 的 JS 入口路径，和 node 可执行文件放在一起。
+ * npm 的 JS 入口候选路径，按顺序探测。
  *
  * 为什么不直接 `spawn('npm')`：Windows 上 npm 是 `.cmd` 批处理，不是可执行
  * 文件，于是
@@ -60,27 +61,59 @@ export interface RunResult {
  *
  * 用 `node <npm-cli.js>` 绕过整个 `.cmd` 包装，三个问题一起消失，而且
  * Windows 与 Linux 走的是同一条 `shell: false` 路径。
+ *
+ * npm-cli.js 的位置有两种布局，都必须覆盖：
+ *
+ * - Windows 官方安装包：`<dir>/node.exe` 与 `<dir>/node_modules/npm/` 同目录
+ * - Unix prefix 安装（**官方 node Docker 镜像**、nvm、homebrew、发行版）：
+ *   `<prefix>/bin/node` + `<prefix>/lib/node_modules/npm/`
+ *
+ * 只认第一种时，容器里（node:22-bookworm-slim）每次安装都在第一步报
+ * 「找不到 npm 入口」就失败，而这个失败对用户完全不可见——装 CLI 看起来
+ * 永远不成功。
  */
+export function npmCliCandidatesFor(execPath: string): string[] {
+  const dir = dirname(execPath);
+  return [
+    join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    join(dir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ];
+}
+
+export function npmCliCandidates(): string[] {
+  return npmCliCandidatesFor(process.execPath);
+}
+
+/** npm 的 JS 入口路径，按候选顺序取第一个真实存在的。 */
 export function npmCliPath(): string {
-  return join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+  for (const candidate of npmCliCandidates()) {
+    if (existsSync(candidate)) return candidate;
+  }
+  // 都不存在时返回第一个候选：requireNpm 会把全部候选列进报错里。
+  return npmCliCandidates()[0]!;
 }
 
 /**
  * 确认 npm 入口存在。
  *
- * 显式检查并给出路径，而不是让 `node <不存在的路径>` 抛一个 MODULE_NOT_FOUND
- * 栈——后者对着一串 loader 内部帧，看不出是环境问题还是代码问题。
+ * 显式检查并给出全部候选路径，而不是让 `node <不存在的路径>` 抛一个
+ * MODULE_NOT_FOUND 栈——后者对着一串 loader 内部帧，看不出是环境问题还是
+ * 代码问题。
  */
 async function requireNpm(): Promise<string> {
-  const path = npmCliPath();
-  try {
-    await access(path);
-  } catch {
-    throw new Error(
-      `找不到 npm 入口 ${path}。本镜像的 node 安装布局与预期不同，无法自动安装 CLI`,
-    );
+  const candidates = npmCliCandidates();
+  for (const path of candidates) {
+    try {
+      await access(path);
+      return path;
+    } catch {
+      // 试下一个候选布局
+    }
   }
-  return path;
+  throw new Error(
+    `找不到 npm 入口（尝试过 ${candidates.join('；')}）。` +
+      '当前 Node 的安装布局与预期不同，无法自动安装 CLI',
+  );
 }
 
 /**
@@ -103,14 +136,25 @@ export function run(
     let stdout = '';
     let stderr = '';
 
+    // 按行缓冲后再回调 onLine：chunk 边界可能把一行撕成两半，直接按 chunk
+    // 分行会让任务日志里出现「半行 + 半行」的碎日志，看进度时特别难受。
+    const lineBuffers: Record<'out' | 'err', string> = { out: '', err: '' };
+    const emitLines = (into: 'out' | 'err', flush: boolean): void => {
+      const parts = lineBuffers[into].split('\n');
+      lineBuffers[into] = flush ? '' : (parts.pop() ?? '');
+      for (const line of parts) {
+        const trimmed = line.trimEnd();
+        if (trimmed.trim().length > 0) options.onLine?.(trimmed);
+      }
+    };
+
     const feed = (chunk: Buffer, into: 'out' | 'err'): void => {
       const text = chunk.toString('utf8');
       if (into === 'out') stdout += text;
       else stderr += text;
       if (options.onLine !== undefined) {
-        for (const line of text.split('\n')) {
-          if (line.trim().length > 0) options.onLine(line.trimEnd());
-        }
+        lineBuffers[into] += text;
+        emitLines(into, false);
       }
     };
 
@@ -125,7 +169,13 @@ export function run(
       reject(error);
     });
 
-    child.on('close', (code) => resolve({ code, stdout, stderr }));
+    child.on('close', (code) => {
+      if (options.onLine !== undefined) {
+        emitLines('out', true);
+        emitLines('err', true);
+      }
+      resolve({ code, stdout, stderr });
+    });
   });
 }
 
@@ -177,6 +227,11 @@ export async function installCli(options: InstallOptions): Promise<InstallResult
     prefix,
     '--no-audit',
     '--no-fund',
+    // 无 TTY 时 npm 默认几乎不输出任何东西：228 MB 的包要下几分钟，任务
+    // 日志却一直是空的，界面上看起来就像卡死。http 级别把每次 registry
+    // 抓取打成一行动态日志，任务面板就能看到真实进展。
+    '--loglevel',
+    'http',
   ];
   if (spec.registry !== undefined) {
     args.push('--registry', spec.registry);

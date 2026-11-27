@@ -9,6 +9,7 @@ import { listPackageTypes } from '../../catalog/index.js';
 import { probeAllClis, type CliProbeResult } from '../../cli/index.js';
 import { listCredentials, type CredentialSummary } from '../../credentials/index.js';
 import type { Db } from '../../db/index.js';
+import { listJobs, type Job } from '../../jobs/index.js';
 import {
   checkStoredTargets,
   findCredentialType,
@@ -27,6 +28,7 @@ import {
   raw,
   sectionTitle,
   shortTime,
+  statusBadge,
   type Html,
 } from '../html.js';
 
@@ -34,11 +36,14 @@ import {
 export interface SettingsFlash {
   readonly message?: string;
   readonly error?: string;
+  /** 警告色提示：不算出错，但也不是值得用绿色庆祝的事。 */
+  readonly warn?: string;
 }
 
 function flashNotice(flash: SettingsFlash): Html {
   return html`
     ${flash.error === undefined ? html`` : html`<div class="notice err">${flash.error}</div>`}
+    ${flash.warn === undefined ? html`` : html`<div class="notice warn">${flash.warn}</div>`}
     ${flash.message === undefined ? html`` : html`<div class="notice ok">${flash.message}</div>`}
   `;
 }
@@ -181,7 +186,115 @@ X-CI-Key: &lt;CI_KEY&gt;</pre>
 
 /* --------------------------------- 平台 CLI -------------------------------- */
 
-function cliCard(cli: CliProbeResult): Html {
+/** 任务面板里最多渲染的日志行数。完整日志保存在任务记录里。 */
+const LOG_TAIL_LINES = 80;
+
+/** 每张 CLI 卡片附带的安装任务信息。 */
+interface CliInstallJobView {
+  readonly job: Job;
+  /** 排队中时，队列里排在它前面的任务数。 */
+  readonly ahead: number;
+  /** 这个 CLI 的历史安装任务数（含当前这条）。 */
+  readonly total: number;
+}
+
+/** 任务时间信息。执行中的「已运行」由每次自动刷新重算。 */
+function jobTiming(job: Job, ahead: number): Html {
+  if (job.status === 'queued') {
+    return html`
+      投递 ${shortTime(job.createdAt)}
+      ${ahead > 0 ? html` · 前面还有 ${String(ahead)} 个任务在排队` : html` · 即将执行`}
+    `;
+  }
+  if (job.status === 'running' && job.startedAt !== null) {
+    return html`
+      开始 ${shortTime(job.startedAt)} · 已运行
+      ${durationLabel(job.startedAt, new Date().toISOString())}
+    `;
+  }
+  const parts: Html[] = [html`投递 ${shortTime(job.createdAt)}`];
+  if (job.startedAt !== null) parts.push(html`开始 ${shortTime(job.startedAt)}`);
+  if (job.finishedAt !== null) parts.push(html`结束 ${shortTime(job.finishedAt)}`);
+  if (job.startedAt !== null && job.finishedAt !== null) {
+    parts.push(html`耗时 ${durationLabel(job.startedAt, job.finishedAt)}`);
+  }
+  return join(parts, ' · ');
+}
+
+function durationLabel(from: string, to: string): string {
+  const seconds = Math.max(0, Math.round((Date.parse(to) - Date.parse(from)) / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const rest = seconds % 60;
+  if (hours > 0) return `${String(hours)} 小时 ${String(minutes)} 分`;
+  if (minutes > 0) return `${String(minutes)} 分 ${String(rest)} 秒`;
+  return `${String(rest)} 秒`;
+}
+
+/**
+ * CLI 安装任务面板：状态、耗时、失败原因与日志。
+ *
+ * 安装是「投进队列就回去」的长任务，没有这块面板的话，用户只能反复刷新
+ * 页面猜它装到哪了——失败了也只表现为「一直没显示成功」。
+ */
+function installJobPanel(view: CliInstallJobView): Html {
+  const { job } = view;
+  const active = job.status === 'queued' || job.status === 'running';
+  const failed = job.status === 'failed' || job.status === 'timeout';
+  const stageClass =
+    job.status === 'queued'
+      ? 'warn'
+      : job.status === 'running'
+        ? 'run'
+        : job.status === 'success'
+          ? 'ok'
+          : failed
+            ? 'err'
+            : '';
+
+  const lines = job.log.split('\n').filter((line) => line !== '');
+  const tail = lines.slice(-LOG_TAIL_LINES);
+  const truncated = lines.length - tail.length;
+  const logLabel =
+    truncated > 0
+      ? `（共 ${String(lines.length)} 行，显示最后 ${String(tail.length)} 行）`
+      : `（${String(lines.length)} 行）`;
+
+  return html`
+    <div class="stage ${stageClass}" style="margin-top:14px">
+      <div class="stage-head">
+        <strong>安装任务</strong>
+        ${statusBadge(job.status)}
+        <span class="subtle">${jobTiming(job, view.ahead)}</span>
+        ${view.total > 1
+          ? html`<span class="subtle">此前还有 ${String(view.total - 1)} 次安装尝试</span>`
+          : html``}
+      </div>
+      <div class="stage-body">
+        ${job.error === null
+          ? html``
+          : html`<div class="notice err" style="margin:0 0 12px">${job.error}</div>`}
+        ${tail.length === 0
+          ? html`<p class="subtle" style="margin:0">还没有输出。npm 在准备阶段不打印内容，开始抓取后日志会出现在这里。</p>`
+          : html`
+              <details${raw(active || failed ? ' open' : '')}>
+                <summary class="subtle">安装日志${logLabel}</summary>
+                <pre style="margin-top:10px">${tail.join('\n')}</pre>
+              </details>
+            `}
+        ${active
+          ? html`<p class="subtle" style="margin:10px 0 0">
+              任务执行中，本页每 3 秒自动刷新，新日志会实时出现在上面。
+            </p>`
+          : html``}
+      </div>
+    </div>
+  `;
+}
+
+function cliCard(cli: CliProbeResult, jobView: CliInstallJobView | undefined): Html {
+  const installing = jobView !== undefined && (jobView.job.status === 'queued' || jobView.job.status === 'running');
+
   return html`
     <div class="cli-card">
       <div class="cli-main">
@@ -190,6 +303,7 @@ function cliCard(cli: CliProbeResult): Html {
           <span class="badge ${raw(cli.install.ok ? 'ok' : 'err')}">
             ${cli.install.ok ? '可用' : '不可用'}
           </span>
+          ${installing ? html`<span class="badge run">安装中</span>` : html``}
           ${cli.installKind === 'manual'
             ? html`<span class="badge warn">需人工安装</span>`
             : html``}
@@ -243,6 +357,8 @@ function cliCard(cli: CliProbeResult): Html {
               </details>
             `
           : html``}
+
+        ${jobView === undefined ? html`` : installJobPanel(jobView)}
       </div>
 
       <div class="cli-actions">
@@ -250,7 +366,7 @@ function cliCard(cli: CliProbeResult): Html {
           ? html`<span class="subtle">只能人工安装</span>`
           : html`
               <form method="post" action="/settings/cli/${cli.cliId}/install">
-                <button class="btn small" type="submit">
+                <button class="btn small" type="submit"${raw(installing ? ' disabled' : '')}>
                   ${cli.installed ? '重新安装 / 升级' : '安装'}
                 </button>
               </form>
@@ -260,11 +376,48 @@ function cliCard(cli: CliProbeResult): Html {
   `;
 }
 
+/**
+ * 每个 CLI 的最新安装任务视图。
+ *
+ * listJobs 按 seq 倒序（最新在前），同一个 CLI 只取最新一条展示；历史
+ * 尝试以计数形式提示。排队任务的 FIFO 位置用来显示「前面还有几个任务」。
+ */
+function cliInstallJobViews(db: Db): Map<string, CliInstallJobView> {
+  const jobs = listJobs(db, { kind: 'cli_install' });
+  const counts = new Map<string, number>();
+  for (const job of jobs) {
+    counts.set(job.refId, (counts.get(job.refId) ?? 0) + 1);
+  }
+
+  const queuedFifo = [...listJobs(db, { status: 'queued' })].reverse();
+
+  const views = new Map<string, CliInstallJobView>();
+  for (const job of jobs) {
+    if (views.has(job.refId)) continue;
+    const ahead = queuedFifo.findIndex((queued) => queued.id === job.id);
+    views.set(job.refId, {
+      job,
+      ahead: ahead < 0 ? 0 : ahead,
+      total: counts.get(job.refId) ?? 1,
+    });
+  }
+  return views;
+}
+
+/** 有 CLI 安装任务在排队或执行时，设置页需要自动刷新。 */
+export function cliInstallActive(db: Db): boolean {
+  return listJobs(db, { kind: 'cli_install' }).some(
+    (job) => job.status === 'queued' || job.status === 'running',
+  );
+}
+
 export async function cliPage(
+  db: Db,
   cliHome: string,
   flash: SettingsFlash = {},
 ): Promise<Html> {
   const clis = await probeAllClis(cliHome);
+  const jobViews = cliInstallJobViews(db);
 
   return html`
     ${pageHeader({
@@ -275,10 +428,10 @@ export async function cliPage(
     ${flashNotice(flash)}
     ${clis.length === 0
       ? emptyPanel(html`没有注册任何 CLI。`)
-      : html`<div class="panel">${join(clis.map(cliCard))}</div>`}
+      : html`<div class="panel">${join(clis.map((cli) => cliCard(cli, jobViews.get(cli.cliId))))}</div>`}
     <p class="subtle">
-      安装是长任务，会投递到任务队列执行；投递后可在
-      <a href="/releases">发布记录</a> 旁的任务状态里看进展。这里刷新页面只反映当前结果。
+      安装是长任务，会投递到任务队列执行；状态与日志直接显示在各 CLI 的卡片里，
+      排队或执行中本页每 3 秒自动刷新。失败会保留原因与日志，再点一次「安装」即可重试。
     </p>
   `;
 }

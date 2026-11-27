@@ -7,6 +7,7 @@ import { createSessionStore } from '../auth/session.js';
 import { issueCiKey, setPassword } from '../auth/store.js';
 import { createGame, createPackageType } from '../catalog/index.js';
 import { ensureSchema, open, type Db } from '../db/index.js';
+import { appendLog, enqueue, finish, listJobs } from '../jobs/index.js';
 import type { RuntimeConfig } from '../shared/config.js';
 import { createApp } from './server.js';
 
@@ -400,5 +401,122 @@ describe('CI 上报鉴权', () => {
       headers: { cookie: setCookie.split(';')[0]! },
     });
     assert.equal(res.status, 401);
+  });
+});
+
+describe('设置页：平台 CLI 安装任务', () => {
+  async function adminCookie(): Promise<string> {
+    resetPassword('cli-page-password');
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password: 'cli-page-password' }),
+    });
+    return login.headers.get('set-cookie')!.split(';')[0]!;
+  }
+
+  /** 清空任务表，让每条测试的状态都从零构造，不依赖执行顺序。 */
+  function clearJobs(): void {
+    db.prepare('DELETE FROM jobs').run();
+  }
+
+  function runningInstallJob(cliId: string, log: string): string {
+    clearJobs();
+    const job = enqueue(db, 'cli_install', cliId);
+    db.prepare('UPDATE jobs SET status = ?, started_at = ? WHERE id = ?').run(
+      'running',
+      now(),
+      job.id,
+    );
+    if (log !== '') appendLog(db, job.id, log);
+    return job.id;
+  }
+
+  it('点安装投递任务并重定向，页面出现任务面板与自动刷新', async () => {
+    clearJobs();
+    const cookie = await adminCookie();
+
+    const res = await fetch(`${base}/settings/cli/miniprogram-ci/install`, {
+      method: 'POST',
+      headers: { cookie },
+      redirect: 'manual',
+    });
+    assert.equal(res.status, 303);
+    assert.match(res.headers.get('location') ?? '', /notice=install-queued/);
+    assert.equal(listJobs(db, { kind: 'cli_install' }).length, 1, '应投递一条安装任务');
+
+    const page = await fetch(`${base}/settings/cli`, { headers: { cookie } });
+    const html = await page.text();
+    // 排队中的任务在页面上可见：状态徽标 + 队列信息 + 自动刷新
+    assert.match(html, /排队中/);
+    assert.match(html, /即将执行|前面还有/);
+    assert.match(html, /http-equiv="refresh"/, '有任务排队时页面应自动刷新');
+    assert.match(html, /安装任务/, 'CLI 卡片应带安装任务面板');
+  });
+
+  it('执行中显示日志与已运行时间，重复点安装被挡住', async () => {
+    runningInstallJob('tt-minigame-ide-cli', 'npm http fetch GET 200 https://registry.npmjs.org/tt-minigame-ide-cli');
+    const cookie = await adminCookie();
+
+    const page = await fetch(`${base}/settings/cli`, { headers: { cookie } });
+    const html = await page.text();
+    assert.match(html, /执行中/);
+    assert.match(html, /已运行/);
+    assert.match(html, /registry\.npmjs\.org\/tt-minigame-ide-cli/, '日志应显示在页面上');
+    assert.match(html, /安装中/, '卡片标题应显示安装中徽标');
+    assert.match(html, /http-equiv="refresh"/, '执行中页面应自动刷新');
+
+    // 已有任务在跑时再点安装：不投递新任务，提示正在执行
+    const res = await fetch(`${base}/settings/cli/tt-minigame-ide-cli/install`, {
+      method: 'POST',
+      headers: { cookie },
+      redirect: 'manual',
+    });
+    assert.equal(res.status, 303);
+    assert.match(res.headers.get('location') ?? '', /notice=install-running/);
+    assert.equal(listJobs(db, { kind: 'cli_install' }).length, 1, '不应重复投递');
+  });
+
+  it('失败的任务显示原因与日志，页面不再自动刷新', async () => {
+    const jobId = runningInstallJob(
+      'miniprogram-ci',
+      '安装 miniprogram-ci@2.1.31 到 /opt/cli/miniprogram-ci/2.1.31',
+    );
+    finish(db, jobId, 'failed', '安装失败（npm 退出码 1）：network timeout');
+    const cookie = await adminCookie();
+
+    const page = await fetch(`${base}/settings/cli`, { headers: { cookie } });
+    const html = await page.text();
+    assert.match(html, /失败/);
+    assert.match(html, /安装失败（npm 退出码 1）：network timeout/, '失败原因应显示在面板上');
+    assert.match(html, /安装 miniprogram-ci@2\.1\.31/, '日志应保留在面板里');
+    assert.doesNotMatch(html, /http-equiv="refresh"/, '任务结束后不再自动刷新');
+  });
+
+  it('日志超长时只渲染最后一段，并标注总行数', async () => {
+    const jobId = runningInstallJob('miniprogram-ci', '');
+    for (let i = 1; i <= 120; i += 1) {
+      appendLog(db, jobId, `npm http fetch GET 200 https://registry.npmjs.org/pkg-${i}`);
+    }
+    const cookie = await adminCookie();
+
+    const page = await fetch(`${base}/settings/cli`, { headers: { cookie } });
+    const html = await page.text();
+    assert.match(html, /共 120 行，显示最后 80 行/);
+    assert.doesNotMatch(html, /pkg-1\b/, '最早的日志行不渲染');
+    assert.match(html, /pkg-120/, '最新 80 行内的日志要渲染');
+  });
+
+  it('成功的任务显示成功徽标', async () => {
+    const jobId = runningInstallJob('miniprogram-ci', '安装完成：miniprogram-ci@2.1.31');
+    finish(db, jobId, 'success');
+    const cookie = await adminCookie();
+
+    const page = await fetch(`${base}/settings/cli`, { headers: { cookie } });
+    const html = await page.text();
+    assert.match(html, /安装任务/);
+    assert.match(html, /安装完成：miniprogram-ci@2\.1\.31/);
+    // 任务面板有成功徽标（探测仍未安装是另一件事，页面上两个状态并存）
+    assert.match(html, /耗时/);
   });
 });

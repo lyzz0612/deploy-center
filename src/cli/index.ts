@@ -13,6 +13,8 @@ export {
   binaryPath,
   currentPrefix,
   installCli,
+  npmCliCandidates,
+  npmCliCandidatesFor,
   npmCliPath,
   run,
   versionPrefix,

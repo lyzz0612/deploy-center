@@ -9,7 +9,7 @@ import { ensureSchema, open, type Db } from '../db/index.js';
 import { listJobs } from '../jobs/index.js';
 import { registerTargetKind, resetTargetKinds, type Check, type GlobalCheckContext, type TargetKind } from '../registry/index.js';
 import { checkKind } from './checks.js';
-import { currentPrefix, npmCliPath, run, versionPrefix } from './install.js';
+import { currentPrefix, npmCliCandidatesFor, npmCliPath, run, versionPrefix } from './install.js';
 import { probeCli } from './probe.js';
 import { readRegistry, recordInstall, registryPath, switchVersion, writeRegistry } from './registry-file.js';
 
@@ -268,6 +268,23 @@ describe('类型级与实例级分离', () => {
 
 
 describe('npm 调用方式（跨平台）', () => {
+  it('npm 入口候选覆盖 Windows 与 Unix prefix 两种布局', () => {
+    // 路径拼接用平台分隔符，统一归一化后再断言，测试在两个平台都成立
+    const normalize = (path: string): string => path.split(/[\\/]+/).join('/');
+
+    const windows = npmCliCandidatesFor('C:\\Program Files\\nodejs\\node.exe').map(normalize);
+    assert.ok(
+      windows.includes('C:/Program Files/nodejs/node_modules/npm/bin/npm-cli.js'),
+      'Windows 官方安装包：node_modules 与 node.exe 同目录',
+    );
+
+    const docker = npmCliCandidatesFor('/usr/local/bin/node').map(normalize);
+    assert.ok(
+      docker.includes('/usr/local/lib/node_modules/npm/bin/npm-cli.js'),
+      '官方 node Docker 镜像：全局 npm 在 <prefix>/lib/node_modules，不在 <prefix>/node_modules',
+    );
+  });
+
   it('能定位到 npm 的 JS 入口', async () => {
     const path = npmCliPath();
     assert.match(path, /npm-cli\.js$/);
