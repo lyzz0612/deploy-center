@@ -1,6 +1,6 @@
 {
   "name": "minigames-publish-console",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "description": "Multi-channel mini-game publish console: build registration, release orchestration and H5 traffic switching",
   "type": "module",
