@@ -131,15 +131,15 @@ docker compose exec app node -e "fetch('https://api.ipify.org').then(r=>r.text()
 
 | 方式 | 产生的镜像标签 |
 | --- | --- |
-| **push 到 `deploy-center`** | **自动发版**：版本号末位 +1，发 `X.Y.Z`、`X.Y`、`latest`、`sha-<短哈希>`，并回推 `chore(release)` 提交与 `vX.Y.Z` 标签 |
+| **push 到 `master`** | **自动发版**：版本号末位 +1，发 `X.Y.Z`、`X.Y`、`latest`、`sha-<短哈希>`，并回推 `chore(release)` 提交与 `vX.Y.Z` 标签 |
 | 推 `v*` 标签（如 `v1.2.3`） | `1.2.3`、`1.2`、`latest`。预发布标签（如 `v1.2.3-rc.1`）只发它自己，不动 `latest` |
 | Actions 页面手动 Run workflow | 分支名、`sha-<短哈希>`、`latest`，可再填一个额外标签；取消勾选 `push_image` 则只构建冒烟、不推送 |
 
 **流程**：算版本号 → 写进 `package.json` → 构建到 runner 本地 → 真起容器查 `/healthz` 与首次设置页 → 登录 GHCR 推送 → **最后**才回推提交与标签。坏镜像不会进仓库，失败的构建也不会白烧掉一个版本号、不会留下没有镜像的标签。
 
-### 自动发版（push 到 deploy-center）
+### 自动发版（push 到 master）
 
-推代码到 `deploy-center` 就会发一个新的补丁版本，不需要手工改版本号或打标签。
+推代码到 `master` 就会发一个新的补丁版本，不需要手工改版本号或打标签。
 
 **版本号怎么来**：取 `package.json` 与仓库里最大的 `v*` 标签中**较大的那个**，末位 +1。只看 `package.json` 会在有人手工打过标签却忘了改文件时算出一个已占用的版本号。预发布标签（含 `-`）与格式不对的标签都被忽略。
 
@@ -157,12 +157,12 @@ docker compose exec app node -e "fetch('https://api.ipify.org').then(r=>r.text()
 
 **已实测**（2026-11-26，run [45825935024](https://github.com/lyzz0612/minigames/actions/runs/45825935024) 与 [45827449030](https://github.com/lyzz0612/minigames/actions/runs/45827449030)）：push 到 `deploy-center` → 算出 `0.1.3` / `0.1.4` → 冒烟过（容器里 `database created at schema version 6`）→ 推 GHCR → 回推提交与标签，且 CI 自己那次回推**没有**触发第二轮。
 
-**手动触发的前提**：GitHub 只在默认分支上列出 `workflow_dispatch` 工作流。本仓库默认分支就是 `deploy-center`，工作流文件在其上，Actions 页面的 Run workflow 按钮可以直接用；**推 `v*` 标签不受影响**——按 GitHub 文档，`push`（含 tag）会执行被推提交里的工作流，"This includes workflows that are not merged into the default branch"。
+**手动触发的前提**：GitHub 只在默认分支上列出 `workflow_dispatch` 工作流。本仓库默认分支是 `master`，工作流文件在其上，Actions 页面的 Run workflow 按钮可以直接用；**推 `v*` 标签不受影响**——按 GitHub 文档，`push`（含 tag）会执行被推提交里的工作流，"This includes workflows that are not merged into the default branch"。
 
 另外，工作流只要跑过一次，就可以用 CLI 对任意分支手动触发（UI 按钮仍要求默认分支有该文件）：
 
 ```bash
-gh workflow run docker-publish.yml --ref deploy-center -f push_image=false
+gh workflow run docker-publish.yml --ref master -f push_image=false
 ```
 
 镜像位于 `ghcr.io/lyzz0612/deploy-center`。**GHCR 的包默认是私有的**，部署机首次拉取要登录（token 带 `read:packages` 即可）；想匿名拉取就到包的设置里把可见性改成 public。

@@ -3,7 +3,7 @@ name: docker-publish
 # 构建中控台镜像并推送到 ghcr.io，同时负责自动发版。
 #
 # 触发方式：
-#   - push 到 deploy-center：**自动发版**。算出下一个补丁版本 → 构建冒烟 →
+#   - push 到 master：**自动发版**。算出下一个补丁版本 → 构建冒烟 →
 #     推镜像 → 回推 `chore(release)` 提交与 `vX.Y.Z` 标签。
 #     只改 docs / README / openspec 时跳过（见 paths-ignore）。
 #   - 推 v* 标签：手工发版，行为不变（想跳版本号或发预发布版时用）
@@ -19,7 +19,7 @@ name: docker-publish
 # 的标签。
 on:
   push:
-    branches: ['deploy-center']
+    branches: ['master']
     tags: ['v*']
     # 这些路径进不了镜像（Dockerfile 只 COPY package.json/lock/tsconfig/src），
     # 改它们不该产生新版本。全部改动都落在这些路径时整个工作流不触发。
@@ -129,12 +129,12 @@ jobs:
             # 只有分支名与 sha 标签，按 latest 拉取的部署机永远拿不到它
             type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' && inputs.push_image }}
             # 分支名标签只在手动触发时有意义。自动发版已经产出
-            # X.Y.Z / X.Y / latest / sha-xxxxxxx，再加一个 deploy-center
+            # X.Y.Z / X.Y / latest / sha-xxxxxxx，再加一个分支名（master）
             # 只是噪音，而且它会被下一次发版悄悄覆盖、指向谁全看时间。
             #
             # 它还抢了 OCI version 标签：type=ref 的优先级是 600，高于
             # type=raw 的 200，于是镜像的 org.opencontainers.image.version
-            # 会变成「deploy-center」而不是真实版本号。
+            # 会变成「master」而不是真实版本号。
             type=ref,event=branch,enable=${{ github.event_name == 'workflow_dispatch' }}
             type=sha,prefix=sha-
             type=raw,value=${{ inputs.extra_tag }},enable=${{ inputs.extra_tag != '' }}
