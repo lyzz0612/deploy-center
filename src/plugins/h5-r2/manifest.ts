@@ -3,7 +3,7 @@
  *
  * 产物按版本写进 bucket，再覆盖一个 2KB 的指针对象切流。入口 index.html
  * 固定不变、可以长缓存，它只去读指针决定加载哪个版本，于是「必须最新」的
- * 面积被压缩到一个对象上。
+ * 面积被压缩到一个对象上。那个入口由插件在首次切流时写好（见 shell.ts）。
  *
  * R2 讲 S3 协议，所以这个 kind 用的是通用的 `s3Keys` 凭据，换成 OSS/COS
  * 之类的 S3 兼容存储也只是换凭据里的 endpoint，不必再写一个 kind。
@@ -16,7 +16,8 @@ export const h5R2Manifest: TargetKindManifest = {
   id: H5_R2_KIND_ID,
   displayName: 'H5 对象存储（R2）',
   description:
-    '把产物按版本上传到 Cloudflare R2（或任何 S3 兼容存储），通过覆盖一个 2KB 的指针对象切流。',
+    '把产物按版本上传到 Cloudflare R2（或任何 S3 兼容存储），在前缀根目录维持一个固定的入口页，' +
+    '再通过覆盖一个 2KB 的指针对象切流。',
 
   accepts: ['h5'],
 

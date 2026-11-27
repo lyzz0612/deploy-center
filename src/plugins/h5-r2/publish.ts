@@ -1,6 +1,9 @@
 /**
  * H5 产物在 R2 上的上传、切流与验证。
  */
+import { access } from 'node:fs/promises';
+import { join } from 'node:path';
+
 import type { S3Client } from '@aws-sdk/client-s3';
 
 import type { PublishContext, StageResult, VerifyResult } from '../../registry/index.js';
@@ -9,10 +12,13 @@ import {
   deleteKeys,
   getPointerBody,
   listKeys,
+  objectExists,
   putPointer,
+  putShell,
   uploadTree,
 } from './client.js';
 import { makePointer, normalizePrefix, parsePointer, POINTER_FILE, VERSIONS_DIR } from './pointer.js';
+import { SHELL_FILE, SHELL_HTML } from './shell.js';
 
 interface Location {
   readonly bucket: string;
@@ -64,6 +70,11 @@ function versionId(ctx: PublishContext): string {
 /** 指针对象的键。 */
 function pointerKey(location: Location): string {
   return `${location.prefix}${POINTER_FILE}`;
+}
+
+/** 入口壳的键。 */
+function shellKey(location: Location): string {
+  return `${location.prefix}${SHELL_FILE}`;
 }
 
 /** 某个版本的资源前缀（以 / 结尾）。 */
@@ -144,6 +155,11 @@ export async function h5R2Execute(stageId: string, ctx: PublishContext): Promise
       const prev =
         current === null ? null : current.active === version ? current.prev : current.active;
 
+      // 先保证入口在，再让指针指过去：反过来的话，指针生效的那一瞬间
+      // 站点根路径是 404，正好撞上有人访问。
+      await ensureShell(client, location, ctx);
+      warnIfNoEntry(ctx);
+
       const pointer = makePointer({ active: version, prev, prefix: location.prefix });
       await putPointer({
         client,
@@ -216,10 +232,48 @@ async function pruneVersions(
 }
 
 /**
- * 回读指针确认切流真的生效。
+ * 保证站点入口壳存在。
+ *
+ * 只在缺失时写：壳是允许被替换的（自己的 loading 页、埋点、骨架屏），每次
+ * 发布都覆盖等于把这个位置从用户手里拿走。想换回内置壳，把对象删掉再发布
+ * 一次即可。
+ */
+async function ensureShell(
+  client: S3Client,
+  location: Location,
+  ctx: PublishContext,
+): Promise<void> {
+  const key = shellKey(location);
+  if (await objectExists({ client, bucket: location.bucket, key, ctx })) {
+    ctx.log(`入口 ${SHELL_FILE} 已存在，保持不动`);
+    return;
+  }
+  await putShell({ client, bucket: location.bucket, key, body: SHELL_HTML, ctx });
+  ctx.log(`已创建入口 ${SHELL_FILE}：它读 ${POINTER_FILE} 再跳到当前版本`);
+}
+
+/**
+ * 产物根目录没有入口时说一句。
+ *
+ * 壳会跳到 `<版本目录>${SHELL_FILE}`，产物里没有这个文件，用户看到的就是
+ * 404；而 404 的现象（白屏或一句「加载失败」）离「包结构不对」这个原因很远。
+ */
+async function warnIfNoEntry(ctx: PublishContext): Promise<void> {
+  try {
+    await access(join(ctx.artifactDir, SHELL_FILE));
+  } catch {
+    ctx.log(`注意：产物根目录没有 ${SHELL_FILE}，入口壳会跳到一个不存在的文件`);
+  }
+}
+
+/**
+ * 回读指针与入口，确认切流真的生效。
  *
  * 回读的是**对外地址**而不是存储接口：对象写进去不代表外部能取到，中间
  * 可能有自定义域没绑、Workers 路由不对、缓存没失效。
+ *
+ * 两样都查：指针对了但入口壳不在，站点根路径照样打不开；而「桶里有什么」
+ * 这件事只有在这里用外部视角才看得出来。
  *
  * 带 `?t=<version>` 绕开缓存：用版本号而不是 `Date.now()`，这样同一版本的
  * 所有请求共享一份缓存，而新版本自然得到新 URL。
@@ -233,6 +287,7 @@ export async function h5R2Verify(ctx: PublishContext): Promise<VerifyResult> {
   }
 
   const url = `${location.baseUrl}${POINTER_FILE}?t=${encodeURIComponent(version)}`;
+  const shellUrl = `${location.baseUrl}${SHELL_FILE}?t=${encodeURIComponent(version)}`;
   try {
     const response = await fetch(url, {
       // Node 的 fetch 不支持 cache 选项，用请求头表达同一意图
@@ -254,7 +309,25 @@ export async function h5R2Verify(ctx: PublishContext): Promise<VerifyResult> {
           '可能是 CDN 缓存未失效，稍后重试验证',
       };
     }
-    return { ok: true, message: `外部已可取到新版本（${url} → ${pointer.active}）` };
+
+    const shell = await fetch(shellUrl, {
+      headers: { 'cache-control': 'no-cache' },
+      signal: ctx.signal,
+    });
+    if (!shell.ok) {
+      return {
+        ok: false,
+        message:
+          `入口 ${SHELL_FILE} 取不到：HTTP ${shell.status}（${shellUrl}）。` +
+          `桶里 ${shellKey(location)} 可能被删了（或在自定义域上被路由排除），` +
+          '再发布一次会补上',
+      };
+    }
+
+    return {
+      ok: true,
+      message: `外部已可取到新版本（${url} → ${pointer.active}），入口 ${SHELL_FILE} 可打开`,
+    };
   } catch (error) {
     return {
       ok: false,

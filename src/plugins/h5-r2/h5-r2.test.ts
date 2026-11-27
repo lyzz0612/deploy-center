@@ -22,6 +22,7 @@ import { h5R2Plugin } from './index.js';
 import { h5R2Manifest } from './manifest.js';
 import { parsePointer, POINTER_FILE, VERSIONS_DIR } from './pointer.js';
 import { h5R2Execute, h5R2Rollback, h5R2Verify } from './publish.js';
+import { SHELL_FILE, SHELL_MARKER } from './shell.js';
 
 const BUCKET = 'test-bucket';
 const scratch = mkdtempSync(join(tmpdir(), 'h5r2-test-'));
@@ -327,7 +328,41 @@ describe('指针与切流', () => {
 
     assert.equal(result.outputs?.['activated'], 'false');
     assert.equal(s3.object(BUCKET, `demo/${POINTER_FILE}`), undefined, '不该写出指针');
+    assert.equal(s3.object(BUCKET, `demo/${SHELL_FILE}`), undefined, '没切流就不该建入口壳');
     assert.ok(s3.keys(BUCKET).some((k) => k.includes(`${VERSIONS_DIR}/r1/`)), '版本应已上传');
+  });
+
+  it('首次切流时创建入口壳：它读指针、再跳到当前版本目录', async () => {
+    await publish({ artifactDir: await makeArtifact(), buildId: 'r1' });
+
+    const shell = s3.object(BUCKET, `demo/${SHELL_FILE}`);
+    assert.ok(shell, '前缀根目录必须有入口 index.html，否则站点打不开');
+    const html = shell.body.toString('utf8');
+    assert.match(html, new RegExp(SHELL_MARKER), '要能认出这是壳而不是产物');
+    assert.match(html, /config\.json/, '壳要去读指针');
+    assert.match(html, /location\.replace/, '壳最终要把浏览器送到版本目录');
+    // 指针不能长缓存，壳也不该长到无法更新
+    assert.match(shell.cacheControl, /max-age=300/);
+    assert.equal(shell.contentType, 'text/html; charset=utf-8');
+  });
+
+  it('已有的入口壳不被覆盖（用户自己的 loading 页留着）', async () => {
+    await publish({ artifactDir: await makeArtifact(), buildId: 'r1' });
+    s3.buckets
+      .get(BUCKET)
+      ?.set(`demo/${SHELL_FILE}`, {
+        body: Buffer.from('<html>my own shell</html>'),
+        contentType: 'text/html',
+        cacheControl: '',
+      });
+
+    await publish({ artifactDir: await makeArtifact(), buildId: 'r2' });
+
+    assert.equal(
+      s3.object(BUCKET, `demo/${SHELL_FILE}`)?.body.toString('utf8'),
+      '<html>my own shell</html>',
+      '发布不该把用户自己写的入口页换掉',
+    );
   });
 
   it('指针损坏时报错，而不是当成「没有指针」把 prev 悄悄丢掉', async () => {
@@ -490,6 +525,21 @@ describe('verify：回读对外地址', () => {
     const result = await h5R2Verify(ctx);
     assert.equal(result.ok, false);
     assert.match(result.message, /HTTP 404|自定义域/);
+  });
+
+  it('入口壳被删掉时验证失败——指针对了但站点根路径打不开', async () => {
+    await publish({ artifactDir: await makeArtifact(), buildId: 'r1', target: target() });
+    s3.buckets.get(BUCKET)?.delete(`demo/${SHELL_FILE}`);
+
+    const { ctx } = await makeCtx({
+      artifactDir: await makeArtifact(),
+      buildId: 'r1',
+      target: target(),
+    });
+    const result = await h5R2Verify(ctx);
+    assert.equal(result.ok, false);
+    assert.match(result.message, /入口 index\.html 取不到/);
+    assert.match(result.message, /再发布一次/);
   });
 
   it('activate: false 时跳过生效验证', async () => {

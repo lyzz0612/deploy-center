@@ -74,6 +74,23 @@ export async function startFakeS3(options: { buckets?: readonly string[] } = {})
       return;
     }
 
+    // HEAD 单个对象：插件用它判断入口壳在不在，不下载内容
+    if (method === 'HEAD') {
+      calls.head += 1;
+      const object = bucket.get(key);
+      if (object === undefined) {
+        fail(404, 'NoSuchKey');
+        return;
+      }
+      res
+        .writeHead(200, {
+          'content-type': object.contentType || 'application/octet-stream',
+          'content-length': String(object.body.byteLength),
+        })
+        .end();
+      return;
+    }
+
     // ListObjectsV2
     if (method === 'GET' && url.searchParams.get('list-type') === '2') {
       calls.list += 1;

@@ -12,6 +12,7 @@ import {
   DeleteObjectsCommand,
   GetObjectCommand,
   HeadBucketCommand,
+  HeadObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
@@ -34,6 +35,15 @@ const DELETE_BATCH = 1000;
  */
 const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable';
 const POINTER_CACHE = 'no-store, max-age=0';
+
+/**
+ * 入口壳的缓存策略。
+ *
+ * 壳的内容不随发布变化，但要为「以后改壳」留一条传播路径：短缓存 + 允许
+ * 回源，新壳最多 5 分钟被取到。用 immutable 会让一次壳的 bug 永久钉在
+ * 已访问过的客户端上。
+ */
+const SHELL_CACHE = 'public, max-age=300, must-revalidate';
 
 /** 按扩展名给 Content-Type。 */
 const CONTENT_TYPES = new Map<string, string>([
@@ -209,6 +219,45 @@ export async function putPointer(options: {
     }),
     { abortSignal: options.ctx.signal },
   );
+}
+
+/** 写入口壳。缓存策略与版本资源、指针都不同，见 SHELL_CACHE。 */
+export async function putShell(options: {
+  readonly client: S3Client;
+  readonly bucket: string;
+  readonly key: string;
+  readonly body: string;
+  readonly ctx: PublishContext;
+}): Promise<void> {
+  await options.client.send(
+    new PutObjectCommand({
+      Bucket: options.bucket,
+      Key: options.key,
+      Body: options.body,
+      ContentType: 'text/html; charset=utf-8',
+      CacheControl: SHELL_CACHE,
+    }),
+    { abortSignal: options.ctx.signal },
+  );
+}
+
+/** 对象是否存在。用 HEAD 而不是 GET：入口壳可能有几百 KB 的自定义版本。 */
+export async function objectExists(options: {
+  readonly client: S3Client;
+  readonly bucket: string;
+  readonly key: string;
+  readonly ctx: PublishContext;
+}): Promise<boolean> {
+  try {
+    await options.client.send(
+      new HeadObjectCommand({ Bucket: options.bucket, Key: options.key }),
+      { abortSignal: options.ctx.signal },
+    );
+    return true;
+  } catch (error) {
+    if (isNotFound(error)) return false;
+    throw error;
+  }
 }
 
 /** 读指针对象。对象不存在时返回 null（首次发布的正常情况）。 */
