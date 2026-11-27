@@ -117,6 +117,17 @@ function toRelease(db: Db, row: ReleaseRow): Release {
  */
 export const ROLLBACK_STAGE_ID = '__rollback__';
 
+/**
+ * 结果验证的阶段 id。
+ *
+ * 验证也走阶段表，而不是「跑完阶段之后再补一句日志」：只有落成阶段，
+ * 验证的结论、耗时与失败原因才有地方显示，重试才能只重跑验证而不重传
+ * 产物。不这么做的话，一次「所有阶段都成功、整条记录却失败」的发布在
+ * 界面上是一句没有理由的判决——原因只写进了任务日志，而发布详情页
+ * 展示的是阶段日志。
+ */
+export const VERIFY_STAGE_ID = '__verify__';
+
 export interface CreateReleaseInput {
   readonly buildId: string;
   readonly targetId: string;

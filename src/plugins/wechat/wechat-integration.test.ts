@@ -20,7 +20,13 @@ import { createGame, createPackageType } from '../../catalog/index.js';
 import { createCredential } from '../../credentials/index.js';
 import { ensureSchema, open, type Db } from '../../db/index.js';
 import { enqueue, startRunner } from '../../jobs/index.js';
-import { createRelease, executeRelease, getRelease } from '../../releases/index.js';
+import {
+  createRelease,
+  executeRelease,
+  getRelease,
+  releaseStages,
+  VERIFY_STAGE_ID,
+} from '../../releases/index.js';
 import { registerTargetKind, resetTargetKinds } from '../../registry/index.js';
 import { createTarget } from '../../targets/index.js';
 import { wechatPlugin } from './index.js';
@@ -105,7 +111,7 @@ async function setup(
     buildId: buildPk,
     targetId: target.id,
     params,
-    stageIds: ['upload'],
+    stageIds: releaseStages(wechatPlugin),
   });
 
   return { db, releaseId: release.id, cliHome, callsFile };
@@ -273,6 +279,11 @@ describe('结果验证', () => {
       assert.equal(release.status, 'failed', '验证不通过不该算成功');
       // 但上传阶段本身是成功的——区分「动作做完了」与「结果没达到预期」
       assert.equal(release.stages[0]!.status, 'success');
+
+      // 原因落在验证阶段自己的日志里，而不是只留在任务日志里
+      const verifyStage = release.stages.find((st) => st.stageId === VERIFY_STAGE_ID);
+      assert.equal(verifyStage?.status, 'failed');
+      assert.match(verifyStage?.log ?? '', /出口 IP 不在白名单/);
     } finally {
       s.db.close();
     }

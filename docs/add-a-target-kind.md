@@ -168,7 +168,7 @@ import { myPlugin } from './h5-oss/index.js';
 const PLUGINS: readonly TargetKind[] = [wechatPlugin, h5R2Plugin, myPlugin];
 ```
 
-**到这里就结束了。** 核心会自动：把它列进「添加发布目标」的类型选择和自检页、按 `accepts` 过滤发布候选、渲染两套表单、按 `stages` 编排执行、按 `capabilities` 决定显示哪个回滚入口。
+**到这里就结束了。** 核心会自动：把它列进「添加发布目标」的类型选择和自检页、按 `accepts` 过滤发布候选、渲染两套表单、按 `stages` 编排执行、把 `verify()` 作为最后一个阶段执行（成功或失败都写进那条发布的阶段日志，失败可以只重跑这一步、不必重传产物）、按 `capabilities` 决定显示哪个回滚入口。
 
 ### 5. 需要新 CLI 时加一条 spec
 

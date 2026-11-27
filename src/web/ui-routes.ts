@@ -39,6 +39,7 @@ import {
   deleteReleasesByTarget,
   getRelease,
   prepareRetry,
+  releaseStages,
   ROLLBACK_STAGE_ID,
 } from '../releases/index.js';
 import type { RuntimeConfig } from '../shared/config.js';
@@ -514,7 +515,7 @@ export async function handleUi(
           buildId: buildPk,
           targetId,
           params: collectFields(form, 'params', kind.manifest.publishFields),
-          stageIds: kind.manifest.stages.map((s) => s.id),
+          stageIds: releaseStages(kind),
         });
         enqueue(deps.db, 'publish', release.id);
         redirect(res, `/releases/${release.id}`);

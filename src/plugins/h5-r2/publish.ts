@@ -258,9 +258,21 @@ export async function h5R2Verify(ctx: PublishContext): Promise<VerifyResult> {
   } catch (error) {
     return {
       ok: false,
-      message: `回读指针出错：${error instanceof Error ? error.message : String(error)}（${url}）`,
+      message: `回读指针出错：${describeFetchError(error)}（${url}）`,
     };
   }
+}
+
+/**
+ * Node 的 fetch 只抛一句 `fetch failed`，真正的原因（域名解析不了、
+ * 证书不匹配、连接被拒）压在里面那层 cause 里。不把它翻出来，用户在
+ * 发布记录里看到的是一句没法行动的话。
+ */
+function describeFetchError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const cause: unknown = error.cause;
+  const detail = cause instanceof Error ? cause.message : undefined;
+  return detail === undefined || detail === '' ? error.message : `${error.message}：${detail}`;
 }
 
 /**

@@ -502,6 +502,18 @@ describe('verify：回读对外地址', () => {
     assert.equal(result.ok, true);
     assert.match(result.message, /跳过/);
   });
+
+  it('对外地址连不上时，把底层原因一起写进结论', async () => {
+    const { ctx } = await makeCtx({
+      artifactDir: await makeArtifact(),
+      target: { bucket: BUCKET, prefix: 'demo/', baseUrl: 'http://no-such-host.invalid/' },
+    });
+    const result = await h5R2Verify(ctx);
+    assert.equal(result.ok, false);
+    // 只有「fetch failed」的话，用户不知道是 DNS、证书还是连接被拒
+    assert.match(result.message, /no-such-host\.invalid/);
+    assert.match(result.message, /ENOTFOUND|getaddrinfo|EAI_AGAIN/);
+  });
 });
 
 describe('错误分类', () => {

@@ -20,7 +20,7 @@ import { createGame, createPackageType } from '../catalog/index.js';
 import { createCredential } from '../credentials/index.js';
 import { ensureSchema, open, type Db } from '../db/index.js';
 import { enqueue, startRunner } from '../jobs/index.js';
-import { createRelease, executeRelease, getRelease } from '../releases/index.js';
+import { createRelease, executeRelease, getRelease, releaseStages } from '../releases/index.js';
 import {
   checkRegistries,
   registerTargetKind,
@@ -70,7 +70,8 @@ interface Scenario {
 function setup(): Scenario {
   const trace = freshTrace();
   // 文档步骤 4：注册。核心应当自动把它纳入全部流程。
-  registerTargetKind(createDocExamplePlugin(trace));
+  const plugin = createDocExamplePlugin(trace);
+  registerTargetKind(plugin);
 
   const db = open({ file: ':memory:' });
   ensureSchema(db);
@@ -105,7 +106,7 @@ function setup(): Scenario {
     buildId: buildPk,
     targetId: target.id,
     params: { tag: 'v1' },
-    stageIds: ['deploy'],
+    stageIds: releaseStages(plugin),
   });
 
   return { db, releaseId: release.id, trace };

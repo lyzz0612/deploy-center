@@ -6,7 +6,7 @@ import { getBuild } from '../builds/index.js';
 import { readSecrets } from '../credentials/index.js';
 import type { Db } from '../db/index.js';
 import type { JobContext } from '../jobs/index.js';
-import { getTargetKind, type StageResult, type TargetKind } from '../registry/index.js';
+import { getTargetKind, type PublishContext, type StageResult, type TargetKind } from '../registry/index.js';
 import { getTarget } from '../targets/index.js';
 import { createContext } from './context.js';
 import {
@@ -16,6 +16,7 @@ import {
   setReleaseStatus,
   ROLLBACK_STAGE_ID,
   startStage,
+  VERIFY_STAGE_ID,
   type Release,
   type StageStatus,
 } from './store.js';
@@ -32,6 +33,14 @@ export interface ExecuteDeps {
 function pendingStages(release: Release): Release['stages'] {
   return release.stages.filter((s) => s.status !== 'success');
 }
+
+/**
+ * 结果验证的超时。
+ *
+ * 验证只是一次回读（HTTP 请求或平台侧查询），不该跟着上传阶段的十几分钟
+ * 走；卡住不返回时必须由自己这条线掐断，否则整条记录会一直显示「执行中」。
+ */
+const VERIFY_TIMEOUT_MS = 60_000;
 
 /**
  * 执行一次发布。
@@ -101,8 +110,13 @@ export async function executeRelease(deps: ExecuteDeps, job: JobContext): Promis
 
     for (const stage of todo) {
       const isRollback = stage.stageId === ROLLBACK_STAGE_ID;
+      const isVerify = stage.stageId === VERIFY_STAGE_ID;
       const declared = kind.manifest.stages.find((s) => s.id === stage.stageId);
-      const stageName = isRollback ? '回滚' : (declared?.name ?? stage.stageId);
+      const stageName = isRollback
+        ? '回滚'
+        : isVerify
+          ? '验证发布结果'
+          : (declared?.name ?? stage.stageId);
 
       if (failed) {
         // 前序阶段失败时后续阶段不执行（release-execution spec）
@@ -124,15 +138,23 @@ export async function executeRelease(deps: ExecuteDeps, job: JobContext): Promis
 
       try {
         // 回滚走 rollback() 而不是 execute()：发布阶段会切到当前版本，
-        // 拿它做回滚等于什么都没做。
+        // 拿它做回滚等于什么都没做。验证同理——它是核心的动作，插件
+        // 的 execute() 里并没有这个阶段。
         const runStage = (): Promise<StageResult> => {
-          if (!isRollback) return kind.execute(stage.stageId, stageCtx);
-          if (kind.rollback === undefined) {
-            throw new Error(`${kind.manifest.displayName} 没有实现 rollback()`);
+          if (isRollback) {
+            if (kind.rollback === undefined) {
+              throw new Error(`${kind.manifest.displayName} 没有实现 rollback()`);
+            }
+            return kind.rollback(stageCtx);
           }
-          return kind.rollback(stageCtx);
+          if (isVerify) return runVerify(kind, stageCtx);
+          return kind.execute(stage.stageId, stageCtx);
         };
-        const timeoutMs = isRollback ? 60_000 : declared?.timeoutMs;
+        const timeoutMs = isRollback
+          ? 60_000
+          : isVerify
+            ? VERIFY_TIMEOUT_MS
+            : declared?.timeoutMs;
         const result = await runWithTimeout(runStage, timeoutMs, job.signal);
         Object.assign(outputs, result.outputs ?? {});
         finishStage(db, releaseId, stage.stageId, stage.attempt, 'success');
@@ -152,20 +174,6 @@ export async function executeRelease(deps: ExecuteDeps, job: JobContext): Promis
       const hasTimeout = getRelease(db, releaseId).stages.some((s) => s.status === 'timeout');
       setReleaseStatus(db, releaseId, hasTimeout ? 'timeout' : 'failed');
       return;
-    }
-
-    // 结果验证：声明支持时必须执行，不通过则不进入成功状态。
-    // 回滚不跑 verify——它验的是「刚发布的版本生效了」，而回滚的目标
-    // 是旧版本，断言会反过来失败。
-    const isRollbackRelease = todo.some((s) => s.stageId === ROLLBACK_STAGE_ID);
-    if (!isRollbackRelease && kind.manifest.capabilities.verify && kind.verify !== undefined) {
-      job.log('验证发布结果');
-      const verified = await kind.verify(managed.ctx);
-      job.log(`验证：${verified.message}`);
-      if (!verified.ok) {
-        setReleaseStatus(db, releaseId, 'failed');
-        return;
-      }
     }
 
     if (Object.keys(outputs).length > 0) {
@@ -202,6 +210,23 @@ export async function executeRelease(deps: ExecuteDeps, job: JobContext): Promis
       await prepared.cleanup();
     }
   }
+}
+
+/**
+ * 结果验证作为一个阶段执行。
+ *
+ * 不通过就抛错，走阶段失败的同一条路径：原因落进阶段日志、整条记录不
+ * 进入成功状态，而重试只会重跑这一阶段——产物不必重新上传。
+ */
+async function runVerify(kind: TargetKind, ctx: PublishContext): Promise<StageResult> {
+  if (kind.verify === undefined) {
+    // 声明与实现不一致在启动自检里就被拦下了，这里只是兜底
+    throw new Error(`${kind.manifest.displayName} 声明了验证但没实现 verify()`);
+  }
+  const result = await kind.verify(ctx);
+  if (!result.ok) throw new Error(result.message);
+  ctx.log(`验证通过：${result.message}`);
+  return {};
 }
 
 /**

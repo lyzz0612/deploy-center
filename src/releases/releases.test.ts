@@ -16,6 +16,7 @@ import { registerTargetKind, resetTargetKinds } from '../registry/index.js';
 import { createTarget, deleteTarget } from '../targets/index.js';
 import { createContext } from './context.js';
 import { executeRelease } from './execute.js';
+import { releaseStages } from './plan.js';
 import {
   createRelease,
   deleteRelease,
@@ -25,6 +26,7 @@ import {
   listStageAttempts,
   prepareRetry,
   setReleaseStatus,
+  VERIFY_STAGE_ID,
 } from './store.js';
 import { buildZip, sha256 } from '../artifacts/zip-fixture.test-helper.js';
 
@@ -67,7 +69,8 @@ interface Scenario {
 
 function setupScenario(options: EchoOptions = {}): Scenario {
   const observation = freshObservation();
-  registerTargetKind(createEchoPlugin(observation, options));
+  const plugin = createEchoPlugin(observation, options);
+  registerTargetKind(plugin);
 
   const db = open({ file: ':memory:' });
   ensureSchema(db);
@@ -96,7 +99,7 @@ function setupScenario(options: EchoOptions = {}): Scenario {
     buildId: buildPk,
     targetId: target.id,
     params: { version: '1.0.0' },
-    stageIds: ['upload', 'submit'],
+    stageIds: releaseStages(plugin),
   });
 
   const handler: JobHandler = (job: JobContext) =>
@@ -410,7 +413,7 @@ describe('结果验证', () => {
     }
   });
 
-  it('验证不通过时记录不进入成功状态', async () => {
+  it('验证不通过时记录不进入成功状态，且原因落在阶段日志里', async () => {
     const s = setupScenario({ verifyOk: false });
     try {
       await s.run();
@@ -418,21 +421,76 @@ describe('结果验证', () => {
 
       const release = getRelease(s.db, s.releaseId);
       assert.equal(release.status, 'failed', '验证失败不应算成功');
-      // 但各阶段本身是成功的——区分「发布动作做完了」与「结果没达到预期」
+      // 发布动作各阶段本身是成功的，失败的是它们之后的验证阶段——
+      // 三种状态并存才是「做完了，但结果没达到预期」
       assert.deepEqual(
-        release.stages.map((st) => st.status),
-        ['success', 'success'],
+        release.stages.map((st) => [st.stageId, st.status]),
+        [
+          ['upload', 'success'],
+          ['submit', 'success'],
+          [VERIFY_STAGE_ID, 'failed'],
+        ],
       );
+
+      // 用户看到的必须是一句能行动的原因，而不是只有「失败」两个字
+      const verifyStage = release.stages[2]!;
+      assert.match(verifyStage.log, /验证故意失败/);
     } finally {
       s.db.close();
     }
   });
 
-  it('未声明验证时不调用', async () => {
+  it('验证失败后重试只重跑验证，产物不重新上传', async () => {
+    const s = setupScenario({ verifyOk: false });
+    try {
+      await s.run();
+
+      // 换成验证会通过的插件，模拟把自定义域或缓存修好之后重试
+      resetTargetKinds();
+      const retryObs = freshObservation();
+      registerTargetKind(createEchoPlugin(retryObs, { verifyOk: true }));
+
+      const { fromStageId } = prepareRetry(s.db, s.releaseId);
+      assert.equal(fromStageId, VERIFY_STAGE_ID, '应从验证阶段继续');
+
+      const runner = startRunner({
+        db: s.db,
+        handlers: {
+          publish: (job) =>
+            executeRelease(
+              { db: s.db, masterKey: KEY, cliHome: '/opt/cli', workParentDir: scratch },
+              job,
+            ),
+        },
+      });
+      try {
+        enqueue(s.db, 'publish', s.releaseId);
+        await runner.tick();
+      } finally {
+        runner.stop();
+      }
+
+      assert.deepEqual(retryObs.stagesRun, [], '重试验证不应重跑任何发布阶段');
+      assert.equal(retryObs.verifyCalled, true);
+
+      const release = getRelease(s.db, s.releaseId);
+      assert.equal(release.status, 'success');
+      assert.equal(listStageAttempts(s.db, s.releaseId, VERIFY_STAGE_ID).length, 2);
+      assert.equal(listStageAttempts(s.db, s.releaseId, 'upload').length, 1, 'upload 只有一次尝试');
+    } finally {
+      s.db.close();
+    }
+  });
+
+  it('未声明验证时不调用，也不建验证阶段', async () => {
     const s = setupScenario();
     try {
       await s.run();
       assert.equal(s.observation.verifyCalled, false);
+      assert.equal(
+        getRelease(s.db, s.releaseId).stages.some((st) => st.stageId === VERIFY_STAGE_ID),
+        false,
+      );
     } finally {
       s.db.close();
     }
@@ -627,7 +685,8 @@ describe('发布记录', () => {
       ensureSchema(db);
       const game = createGame(db, { slug: 'demo', displayName: '示例' });
       createPackageType(db, { id: 'p', displayName: 'P' });
-      registerTargetKind(createEchoPlugin(freshObservation()));
+      const plugin = createEchoPlugin(freshObservation(), { verifyOk: true });
+      registerTargetKind(plugin);
       const target = createTarget(
         db,
         { gameId: game.id, kind: 'echo', name: 'T', location: { slot: 'a' } },
@@ -643,7 +702,7 @@ describe('发布记录', () => {
         buildId: buildPk,
         targetId: target.id,
         params: {},
-        stageIds: ['upload', 'submit'],
+        stageIds: releaseStages(plugin),
       });
 
       assert.equal(release.status, 'queued');
@@ -652,6 +711,8 @@ describe('发布记录', () => {
         [
           ['upload', 'queued', 1],
           ['submit', 'queued', 1],
+          // 验证也提前建出来：它同样是一个阶段，排队时就该让用户看到
+          [VERIFY_STAGE_ID, 'queued', 1],
         ],
       );
     } finally {

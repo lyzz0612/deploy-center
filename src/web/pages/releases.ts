@@ -4,7 +4,14 @@
 import { getBuild } from '../../builds/index.js';
 import type { Db } from '../../db/index.js';
 import { findTargetKind } from '../../registry/index.js';
-import { getRelease, listReleases, listStageAttempts, type Release } from '../../releases/index.js';
+import {
+  getRelease,
+  listReleases,
+  listStageAttempts,
+  ROLLBACK_STAGE_ID,
+  VERIFY_STAGE_ID,
+  type Release,
+} from '../../releases/index.js';
 import { getTarget } from '../../targets/index.js';
 import {
   emptyPanel,
@@ -48,7 +55,7 @@ export function releasesPage(db: Db): Html {
               release.stages.map(
                 (stage) => html`
                   <span class="badge ${stageClass(stage.status)}">
-                    ${stage.stageId} · ${stageStatusLabel(stage.status)}
+                    ${syntheticStageName(stage.stageId) ?? stage.stageId} · ${stageStatusLabel(stage.status)}
                   </span>
                 `,
               ),
@@ -112,6 +119,18 @@ function stageStatusLabel(status: string): string {
   );
 }
 
+/**
+ * 核心补的合成阶段（验证、回滚）的中文名。
+ *
+ * 它们不在插件声明的 stages 里，不单独起名就会在页面上露出 `__verify__`
+ * 这种内部标识。
+ */
+function syntheticStageName(stageId: string): string | null {
+  if (stageId === VERIFY_STAGE_ID) return '验证发布结果';
+  if (stageId === ROLLBACK_STAGE_ID) return '回滚';
+  return null;
+}
+
 export function releaseDetailPage(db: Db, release: Release): Html {
   const target = (() => {
     try {
@@ -135,7 +154,9 @@ export function releaseDetailPage(db: Db, release: Release): Html {
     release.stages.map((stage) => {
       const attempts = listStageAttempts(db, release.id, stage.stageId);
       const declaredName =
-        kind?.manifest.stages.find((s) => s.id === stage.stageId)?.name ?? stage.stageId;
+        syntheticStageName(stage.stageId) ??
+        kind?.manifest.stages.find((s) => s.id === stage.stageId)?.name ??
+        stage.stageId;
       const previous = attempts.filter((a) => a.attempt !== stage.attempt);
 
       return html`
