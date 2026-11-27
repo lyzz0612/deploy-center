@@ -1,6 +1,6 @@
 # 在 1Panel 上部署（Compose + 反向代理）
 
-适用：1Panel 已装好、域名已解析到这台机器、80/443 可用。镜像由 CI 构建并推到 `ghcr.io/lyzz0612/minigames`，服务器上不需要源码，也不需要本地构建。
+适用：1Panel 已装好、域名已解析到这台机器、80/443 可用。镜像由 CI 构建并推到 `ghcr.io/lyzz0612/deploy-center`，服务器上不需要源码，也不需要本地构建。
 
 ## 1. 准备主密钥
 
@@ -24,7 +24,7 @@ name: minigames-console
 
 services:
   app:
-    image: ghcr.io/lyzz0612/minigames:${IMAGE_TAG:-latest}
+    image: ghcr.io/lyzz0612/deploy-center:${IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
       NODE_ENV: production
@@ -70,19 +70,19 @@ IMAGE_TAG=0.0.1
 - `IMAGE_TAG` 填具体版本，别用 `latest`：升级时才不会在重启后意外跟着变。
 - 如果你的 1Panel 编排页有「环境变量」表单，填在那里等价，二选一即可。
 
-不想维护 `.env` 也行：把上面 YAML 里的 `${...}` 换成实际值直接写死——`MASTER_KEY` 填生成的值（加引号）、镜像写 `ghcr.io/lyzz0612/minigames:0.0.1`、端口写 `"127.0.0.1:3000:3000"`。base64 密钥不含 `$`，不会被 compose 当变量插值；如果你自己换了含 `$` 的密钥，要写成 `$$`。
+不想维护 `.env` 也行：把上面 YAML 里的 `${...}` 换成实际值直接写死——`MASTER_KEY` 填生成的值（加引号）、镜像写 `ghcr.io/lyzz0612/deploy-center:0.0.1`、端口写 `"127.0.0.1:3000:3000"`。base64 密钥不含 `$`，不会被 compose 当变量插值；如果你自己换了含 `$` 的密钥，要写成 `$$`。
 
 ## 4. 拉镜像
 
 GHCR 的包默认私有。二选一：
 
-- **最省事：把包改成 public** — GitHub → 头像 → Your profile → Packages → `minigames` → Package settings → Change visibility → Public。镜像里没有密钥，只有已开源的代码。
+- **最省事：把包改成 public** — GitHub → 头像 → Your profile → Packages → `deploy-center` → Package settings → Change visibility → Public。镜像里没有密钥，只有已开源的代码。
 - **或者登录** — 1Panel → 容器 → 仓库 → 添加仓库：类型 Docker，地址 `ghcr.io`，用户名 `lyzz0612`，密码用带 `read:packages` 的 PAT，保存后点测试连接。之后在编排页「拉取镜像」。
 
 终端手动拉也行：
 
 ```bash
-docker pull ghcr.io/lyzz0612/minigames:0.0.1
+docker pull ghcr.io/lyzz0612/deploy-center:0.0.1
 ```
 
 ## 5. 启动与验收

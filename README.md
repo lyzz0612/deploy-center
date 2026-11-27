@@ -12,7 +12,7 @@
     <a href="openspec/changes/add-publish-console/proposal.md"><strong>查看设计方案 »</strong></a>
     <br />
     <br />
-    <a href="https://github.com/lyzz0612/minigames/issues">提交问题</a>
+    <a href="https://github.com/lyzz0612/deploy-center/issues">提交问题</a>
     ·
     <a href="openspec/changes/add-publish-console/tasks.md">实施计划</a>
   </p>
@@ -70,7 +70,7 @@
 - **数据**：SQLite（WAL）
 - **对象存储**：`@aws-sdk/client-s3`（H5 发到 Cloudflare R2 或任何 S3 兼容存储）
 - **界面**：服务端渲染 HTML（不是 SPA，理由见 design.md D9）
-- **部署**：Docker Compose（单个服务 + 数据卷 + CLI 卷），镜像由 GitHub Actions 构建并发布到 GHCR（`ghcr.io/lyzz0612/minigames`）
+- **部署**：Docker Compose（单个服务 + 数据卷 + CLI 卷），镜像由 GitHub Actions 构建并发布到 GHCR（`ghcr.io/lyzz0612/deploy-center`）
 - **变更管理**：[OpenSpec](https://github.com/Fission-AI/OpenSpec)
 
 <p align="right">(<a href="#readme-top">返回顶部</a>)</p>
@@ -111,8 +111,8 @@
 ### 安装
 
 ```bash
-git clone https://github.com/lyzz0612/minigames.git
-cd minigames
+git clone https://github.com/lyzz0612/deploy-center.git
+cd deploy-center
 docker compose pull   # 用 CI 构建好的镜像；没有镜像时改用 up -d --build 从源码构建
 docker compose up -d
 ```
@@ -188,9 +188,9 @@ docker compose up -d
 
 ## 联系
 
-项目地址：[https://github.com/lyzz0612/minigames](https://github.com/lyzz0612/minigames)
+项目地址：[https://github.com/lyzz0612/deploy-center](https://github.com/lyzz0612/deploy-center)
 
-问题反馈：[Issues](https://github.com/lyzz0612/minigames/issues)
+问题反馈：[Issues](https://github.com/lyzz0612/deploy-center/issues)
 
 <p align="right">(<a href="#readme-top">返回顶部</a>)</p>
 

@@ -39,7 +39,7 @@ This repo is a self-hosted publish console for that problem: **CI only builds an
 - Credentials are typed, encrypted and only referenced by publish targets, so rotation touches one place.
 - A release is a multi-stage job: immutable record, retry only the failed stage, rollback decided by declared capability.
 
-**Stack**: Node.js 22 + TypeScript, SQLite (WAL), server-rendered HTML, Docker Compose (one service, two volumes), images built by GitHub Actions and published to GHCR (`ghcr.io/lyzz0612/minigames`).
+**Stack**: Node.js 22 + TypeScript, SQLite (WAL), server-rendered HTML, Docker Compose (one service, two volumes), images built by GitHub Actions and published to GHCR (`ghcr.io/lyzz0612/deploy-center`).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -79,7 +79,7 @@ The core path works and is verified against real HTTP: 475 tests pass, H5 publis
 
 ## Contact
 
-[https://github.com/lyzz0612/minigames](https://github.com/lyzz0612/minigames) · [Issues](https://github.com/lyzz0612/minigames/issues)
+[https://github.com/lyzz0612/deploy-center](https://github.com/lyzz0612/deploy-center) · [Issues](https://github.com/lyzz0612/deploy-center/issues)
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

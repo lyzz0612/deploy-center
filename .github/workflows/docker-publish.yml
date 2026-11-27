@@ -8,7 +8,7 @@ name: docker-publish
 #     只改 docs / README / openspec 时跳过（见 paths-ignore）。
 #   - 推 v* 标签：手工发版，行为不变（想跳版本号或发预发布版时用）
 #   - 手动触发：发布 <分支名> 与 sha-<短哈希>，可额外指定一个标签；
-#     取消勾选 push_image 则只构建并冒烟、不推送
+#     勾选 push_image 时同时更新 latest；取消勾选则只构建并冒烟、不推送
 #
 # 为什么自动发版和构建在同一个工作流里：用 GITHUB_TOKEN 回推的标签**不会**
 # 触发工作流（Actions 的既有行为，防无限递归）。所以「推标签让另一个工作流
@@ -125,6 +125,9 @@ jobs:
             type=raw,value=${{ steps.version.outputs.version }},enable=${{ steps.version.outputs.version != '' }}
             type=raw,value=${{ steps.version.outputs.minorTag }},enable=${{ steps.version.outputs.version != '' }}
             type=raw,value=latest,enable=${{ steps.version.outputs.version != '' }}
+            # 手动触发且勾选 push_image 时同样更新 latest：否则手工发布的镜像
+            # 只有分支名与 sha 标签，按 latest 拉取的部署机永远拿不到它
+            type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' && inputs.push_image }}
             # 分支名标签只在手动触发时有意义。自动发版已经产出
             # X.Y.Z / X.Y / latest / sha-xxxxxxx，再加一个 deploy-center
             # 只是噪音，而且它会被下一次发版悄悄覆盖、指向谁全看时间。
